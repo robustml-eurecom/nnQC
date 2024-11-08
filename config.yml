@@ -1,0 +1,90 @@
+ae:
+  img-ae:
+    name: 'img-ae'
+    train_folder: 'data'
+    n_channels: 1
+    z_dim: 100
+    loss_functions: ['MSELoss', 'SSIM']
+    ckpt_path: 'img-ae_outputs/checkpoints'
+    lr: 0.0002
+  mask-ae:
+    name: 'mask-ae'
+    train_folder: 'data'
+    n_channels: 4
+    z_dim: 100
+    loss_functions: ['BKGDLoss', 'MSELoss']
+    keys: ['BK_', 'LV_', 'MYO_', 'RV_']
+    ckpt_path: 'mask-ae_outputs/checkpoints'
+    loss_args:
+      settling_epochs_BKGDLoss: 10
+      settling_epochs_BKMSELoss: 0
+    lr: 0.0002
+  spatial-ae:
+    generator:
+      in_channels: 4
+      out_channels: 4
+      latent_channels: 3
+    discriminator:
+      spatial_dims: 2
+      in_channels: 4
+      num_layers_d: 3
+      num_channels: 64
+      out_channels: 1
+    ckpt_path: 'spatial-ae_outputs/checkpoints'
+
+ldm:
+  unet:
+    spatial_dims: 2
+    in_channels: 3
+    out_channels: 3
+    num_res_blocks: 3
+    num_channels: [64, 128, 256]
+    attention_levels: [False, True, True]
+    num_head_channels: [0, 128, 256]
+    with_conditioning: True
+    cross_attention_dim: 1600
+  ddpm:
+    num_train_timesteps: 1000 
+    schedule: "scaled_linear_beta" 
+    beta_start: 0.0015 
+    beta_end: 0.0195
+    clip_sample: False
+
+dataset:
+  batch_size: 8
+  keyword: "*npy"
+  classes: 4
+  id_start: 0
+  id_end: 193
+
+ae_trainer:
+  standard:
+    epochs: 200
+    val_interval: 1
+  kl:
+    epochs: 30
+    autoencoder_warm_up_n_epochs: 2
+    val_interval: 5
+    kl_weight: 0.000001
+    perceptual_weight: 0.001
+    adv_weight: 0.01
+
+gan_trainer:
+  epochs: 200
+  lr: 0.0002
+  val_interval: 1
+  ckpt_folder: 'checkpoints'
+  loss_args:
+    functions: ['BKGDLoss', 'BKMSELoss']
+    settling_epochs_BKGDLoss: 5
+    settling_epochs_BKMSELoss: 0
+  
+ldm_trainer:
+  epochs: 400
+  val_interval: 5
+  lr_start: 0.00001
+  lr_end: 0.000002
+
+
+
+

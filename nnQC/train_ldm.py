@@ -1,0 +1,172 @@
+import os
+import tempfile
+from glob import glob
+import matplotlib.pyplot as plt
+import monai
+import nibabel as nib
+import numpy as np
+import torch
+import yaml
+import argparse
+import re
+
+from torch.cuda.amp import autocast
+from utils.dataset import get_dataloader, get_transforms
+from models.networks import (
+    LargeImageAutoEncoder, 
+    ConvAE,
+    SpatialAE,
+    CLIPFeatureExtractor,
+    get_device
+)
+from models.trainers import LDMTrainer
+
+from generative.networks.nets import DiffusionModelUNet
+from generative.networks.schedulers import DDPMScheduler
+from generative.inferers import LatentDiffusionInferer
+
+monai.utils.set_determinism(0)     
+
+
+def load_checkpoint(model, checkpoint_path):
+    ckpt = [f for f in os.listdir(checkpoint_path) if re.search(r'best', f)]
+    if isinstance(model, SpatialAE):
+        model.load_state_dict(torch.load(os.path.join(checkpoint_path, ckpt[0]))['autoencoderkl_state_dict'])
+    else:
+        model.load_state_dict(torch.load(os.path.join(checkpoint_path, ckpt[0]))['model'])
+    print(f'Loaded checkpoint from {os.path.join(checkpoint_path, ckpt[0])}')
+    return model
+
+def run(args):
+    #open config yaml file
+    with open(args.config, "r") as file:
+        config = yaml.safe_load(file)
+    
+    outputs = 'ldm_outputs'
+    if args.experiment_name:
+        outputs = os.path.join(args.experiment_name, outputs)
+    os.makedirs(outputs, exist_ok=True)
+    os.makedirs(os.path.join(outputs, args.log_folder), exist_ok=True)
+    os.makedirs(os.path.join(outputs, args.ckpt_folder), exist_ok=True)
+    
+    img_model_opts = config["ae"]['img-ae']
+    mask_model_opts = config["ae"]['mask-ae']
+    spatial_model_opts = config["ae"]['spatial-ae']
+    dataset_opts = config["dataset"]
+    
+    device = get_device()
+    if not args.use_clip:
+        feature_extractor = load_checkpoint(
+            LargeImageAutoEncoder(**img_model_opts), 
+            os.path.join(
+                args.experiment_name,
+                img_model_opts['ckpt_path'])
+            )
+        mask_ae = load_checkpoint(
+            ConvAE(**mask_model_opts),
+            os.path.join(
+                args.experiment_name,
+                mask_model_opts['ckpt_path'])
+            )
+    else:
+        assert args.clip_text is not None, "Please provide text for CLIP"
+        clip_text = "A segmentation of a " + args.clip_text
+        feature_extractor = CLIPFeatureExtractor(None, dataset_opts['classes'])
+        mask_ae = CLIPFeatureExtractor(clip_text, dataset_opts['classes'])
+        
+    spatial_ae = load_checkpoint(
+        SpatialAE(**spatial_model_opts['generator']),
+        os.path.join(
+            args.experiment_name,
+            spatial_model_opts['ckpt_path'])
+        )
+    
+    feature_extractor = feature_extractor.to(device)
+    mask_ae = mask_ae.to(device)
+    spatial_ae = spatial_ae.to(device)
+   
+    ldm_opts = config["ldm"]
+    unet = DiffusionModelUNet(**ldm_opts['unet']).to(device)
+    scheduler = DDPMScheduler(**ldm_opts['ddpm'])
+    
+    train_loader = get_dataloader(
+        args.data_dir, 
+        "train", 
+        dataset_opts['keyword'], 
+        dataset_opts['batch_size'], 
+        dataset_opts['classes'], 
+        get_transforms("train", dataset_opts['classes']),
+        sanity_check=True
+    )
+    val_loader = get_dataloader(
+        args.data_dir, 
+        "val", 
+        dataset_opts['keyword'], 
+        dataset_opts['batch_size'], 
+        dataset_opts['classes'], 
+        get_transforms("val", dataset_opts['classes']),
+        sanity_check=True
+    )
+    
+    with torch.no_grad():
+        with autocast(enabled=True):
+            check_data = monai.utils.misc.first(val_loader) 
+            z = spatial_ae.autoencoderkl.encode_stage_2_inputs(
+                check_data["seg"].to(device)
+            )
+
+    print(f"Scaling factor set to {1/torch.std(z)}")
+    print("Finished setup")
+    print("Starting training------------------------------------------")
+    
+    scale_factor = 1 / torch.std(z)
+    inferer = LatentDiffusionInferer(scheduler, scale_factor)
+    optimizer = torch.optim.Adam(unet.parameters(), lr=1e-4)
+    
+    epoch = 0
+    if os.listdir(os.path.join(outputs, args.ckpt_folder)):
+        ckpt = torch.load(os.path.join(outputs, args.ckpt_folder, 'best.pth'))
+        unet.load_state_dict(ckpt['unet_state_dict'])
+        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+        epoch = ckpt['epoch']
+        print("Loaded checkpoint")
+    
+    ldm_trainer_opts = config["ldm_trainer"]
+    # compute gamma for the exponential lr scheduler given lr start and end and num steps
+    num_steps = ldm_trainer_opts['epochs'] * sum(1 for _ in train_loader)
+    ldm_trainer_opts['gamma'] = (ldm_trainer_opts['lr_end'] / ldm_trainer_opts['lr_start'])**(1/num_steps)
+    trainer = LDMTrainer(
+        unet=unet,
+        spatial_ae=spatial_ae,
+        feat_extractor=feature_extractor,
+        mask_ae=mask_ae,
+        inferer=inferer,
+        scheduler=scheduler,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        device=device
+    )
+            
+    trainer.train(
+        os.path.join(outputs, args.ckpt_folder),
+        os.path.join(outputs, args.log_folder),
+        **ldm_trainer_opts
+    )
+    
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Train ldm')
+    parser.add_argument('--config', '-c', default='config.yml', type=str, help='Path to config file')
+    parser.add_argument('--data_dir', '-d', default='preprocessed', type=str, help='Path to data directory')
+    parser.add_argument('--ckpt_folder', '-ckpt', default='checkpoints', type=str, help='Folder to save checkpoints')
+    parser.add_argument('--use_clip', action='store_true', help='Use CLIP feature extractor')
+    parser.add_argument('--clip_text', default=None, type=str, help='Text for CLIP')
+    parser.add_argument('--experiment_name', '-e', default=None, type=str, help='Name of experiment')
+    parser.add_argument('--log_folder', '-l', default='logs', type=str, help='Folder to save logs')
+    args = parser.parse_args()
+    
+    run(args)
+    
+        
+
+    
