@@ -19,6 +19,13 @@ def crop_image(image):
     resizer = tuple([slice(*i) for i in zip(minidx,maxidx)])
     return resizer
 
+def compute_spacing(spacing):
+    if len(spacing) == 4:
+        # Combine the spacing of the last two dimensions
+        combined_spacing = spacing[:2] + (spacing[2]**2 + spacing[3]**2)**.5,
+        return combined_spacing
+    return spacing
+
 def process_mask(mask):
     mask = mask.get_fdata()
     if len(mask.shape) == 4:
@@ -70,7 +77,7 @@ def generate_patient_info(folder, patient_ids, start_idx=0):
         patient_info[id+start_idx]['classes'] = np.unique(mask).shape[0]
         patient_info[id+start_idx]["shape"] = image.shape
         patient_info[id+start_idx]["crop"] = crop_image(mask)
-        patient_info[id+start_idx]["spacing"] = spacing
+        patient_info[id+start_idx]["spacing"] = spacing[:3]
         patient_info[id+start_idx]["header"] = header
         patient_info[id+start_idx]["affine"] = affine
         patient_info[id+start_idx]["non_zero_slices"] = non_zero_slices
@@ -115,7 +122,6 @@ def preprocess(patient_ids, start_idx, patient_info, spacing_target, folder, fol
         if len(patient_info[id+start_idx]["non_zero_slices"]) > 0:
             image_arr = image_arr.reshape(image_arr.shape[0], image_arr.shape[1], -1)
             image_arr = image_arr[:,:,patient_info[id+start_idx]["non_zero_slices"]]
-            print(image_arr.shape)
             
         image = preprocess_image(
             image_arr,

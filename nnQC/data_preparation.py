@@ -21,7 +21,7 @@ def format_data(image_paths, mask_paths, destination_folder, maskName, imageName
         shutil.copyfileobj(open(mask, "rb"), open(os.path.join(destination_folder, f"patient{i:04d}", maskName), "wb"))
         
 
-def split_training_testing(data_folder, split=0.8):
+def split_training_testing(data_folder, split=0.8, use_class=-1):
     patient_list = os.listdir(data_folder)
     train_idx = int(len(patient_list) * split)
     train_patients = patient_list[:train_idx]
@@ -35,6 +35,15 @@ def split_training_testing(data_folder, split=0.8):
     os.makedirs(test_folder, exist_ok=True)
     
     for patient in train_patients:
+        if use_class != -1:
+            mask = nib.load(os.path.join(data_folder, patient, "mask.nii.gz"))
+            affine = mask.affine
+            mask = mask.get_fdata()
+            assert use_class > 0, "Class must be greater than 0. The class 0 is reserved for background only."
+            mask[mask != use_class] = 0
+            mask[mask == use_class] = 1
+            mask = nib.Nifti1Image(mask, affine)
+            nib.save(mask, os.path.join(data_folder, patient, "mask.nii.gz"))
         shutil.move(os.path.join(data_folder, patient), os.path.join(train_folder, patient))
     print(f"Training data saved to {train_folder}")
     for patient in test_patients:   
@@ -88,6 +97,7 @@ if __name__ == "__main__":
     parser.add_argument("--save_csv", action="store_true", help="Save the paths to a CSV file.")
     parser.add_argument("--csv_path", type=str, default="dataset.csv", help="Path to save the CSV file.")
     parser.add_argument("--split", "-s", type=float, default=0.8, help="Percentage of data to use for training.")
+    parser.add_argument("--use_class", default=-1, type=int, help="Use a specific class for the segmentation.")
     
     args = parser.parse_args()
     run(args)

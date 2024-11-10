@@ -36,12 +36,10 @@ def run(args):
     elif not args.test:
         patient_info = generate_patient_info(args.raw_folder, patient_ids, args.start_idx)
         np.save(os.path.join(args.folder_out, "patient_info.npy"), patient_info)
-    if args.test not in patient_info:
+    if args.test:
         patient_info = {**patient_info, **generate_patient_info(args.raw_folder, patient_ids, args.start_idx)}
         np.save(os.path.join(args.folder_out, "patient_info.npy"), patient_info)
     
-    non_valid = [id for id in patient_info if len(patient_info[id]["crop"])>3]
-    print(non_valid)
     median_crop, spacing_target = compute_crop_spacing(patient_info)
     fingerprints['crop'] = median_crop
     fingerprints['spacing'] = spacing_target

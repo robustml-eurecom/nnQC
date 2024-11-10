@@ -136,20 +136,20 @@ def run(args):
     
     test_loaders_img = TestDataLoader(
         f"{args.data_dir}/img_testing", 
-        patient_ids=range(dataset_opts['id_start']+args.start_idx, dataset_opts['id_end']+args.start_idx), 
+        patient_ids=range(dataset_opts['id_start']+args.start_idx, dataset_opts['id_end']+args.start_idx+1), 
         batch_size=2,
         transform=transform_monai,
         isimg=True
         )
     test_loaders = TestDataLoader(
         f"{args.data_dir}/testing", 
-        patient_ids=range(dataset_opts['id_start']+args.start_idx, dataset_opts['id_end']+args.start_idx), 
+        patient_ids=range(dataset_opts['id_start']+args.start_idx, dataset_opts['id_end']+args.start_idx+1), 
         batch_size=2,
         transform=transform
         )
     gt_test_loaders = TestDataLoader(
         f"{args.data_dir}/testing", 
-        patient_ids=range(dataset_opts['id_start']+args.start_idx, dataset_opts['id_end']+args.start_idx), 
+        patient_ids=range(dataset_opts['id_start']+args.start_idx, dataset_opts['id_end']+args.start_idx+1), 
         batch_size=2,
         transform=transform
         )

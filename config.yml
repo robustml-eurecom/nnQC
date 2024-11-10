@@ -54,8 +54,8 @@ dataset:
   batch_size: 8
   keyword: "*npy"
   classes: 4
-  id_start: 0
-  id_end: 193
+  id_start: 1428
+  id_end: 1784
 
 ae_trainer:
   standard:
