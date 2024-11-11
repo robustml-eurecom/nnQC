@@ -174,6 +174,7 @@ def run(args):
     os.makedirs(results_output, exist_ok=True)
     np.save("{}/ldm_scores.npy".format(results_output), results['ldm'])
     np.save("{}/real_scores.npy".format(results_output), results['gt'])
+    np.save("{}/baseine.npy".format(results_output), results['baseline'])
     print("-----------------------------------")
     
     

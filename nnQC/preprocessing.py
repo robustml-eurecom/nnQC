@@ -69,7 +69,6 @@ if __name__ == "__main__":
     parser.add_argument('--test', '-t', action='store_true', help='Use test data')
     parser.add_argument('--imgfrmt', '-if', default='nii.gz', type=str, help='Format of the images')
     parser.add_argument('--start_idx', '-s', default=0, type=int, help='Start index')
-    parser.add_argument('--use_class', default=-1, type=int, help='Which class to use (e.g., for FLAIR21 if set to 1 it will use background+liver.)')
     args = parser.parse_args()
     
     run(args)

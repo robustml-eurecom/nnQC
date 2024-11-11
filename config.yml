@@ -10,10 +10,10 @@ ae:
   mask-ae:
     name: 'mask-ae'
     train_folder: 'data'
-    n_channels: 4
+    n_channels: 2
     z_dim: 100
     loss_functions: ['BKGDLoss', 'MSELoss']
-    keys: ['BK_', 'LV_', 'MYO_', 'RV_']
+    keys: ['BK_', 'Spleen']
     ckpt_path: 'mask-ae_outputs/checkpoints'
     loss_args:
       settling_epochs_BKGDLoss: 10
@@ -21,12 +21,12 @@ ae:
     lr: 0.0002
   spatial-ae:
     generator:
-      in_channels: 4
-      out_channels: 4
+      in_channels: 2
+      out_channels: 2
       latent_channels: 3
     discriminator:
       spatial_dims: 2
-      in_channels: 4
+      in_channels: 2
       num_layers_d: 3
       num_channels: 64
       out_channels: 1
@@ -51,18 +51,18 @@ ldm:
     clip_sample: False
 
 dataset:
-  batch_size: 8
+  batch_size: 5
   keyword: "*npy"
-  classes: 4
-  id_start: 1428
-  id_end: 1784
+  classes: 2
+  id_start: 1360
+  id_end: 1432
 
 ae_trainer:
   standard:
     epochs: 200
     val_interval: 1
   kl:
-    epochs: 30
+    epochs: 50
     autoencoder_warm_up_n_epochs: 2
     val_interval: 5
     kl_weight: 0.000001
