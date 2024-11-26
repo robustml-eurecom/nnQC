@@ -21,11 +21,11 @@ def get_image_seg_pairs(keywords, root_dir, absolute=False):
     return image_paths, mask_paths
 
 
-def format_data(image_paths, mask_paths, destination_folder, maskName, imageName):
+def format_data(image_paths, mask_paths, destination_folder, startIdx, maskName, imageName):
     for i, (img, mask) in tqdm(enumerate(zip(image_paths, mask_paths)), total=len(image_paths), desc="Formatting data", postfix="Subject"):
-        os.makedirs(os.path.join(destination_folder, f"patient{i:04d}"), exist_ok=True)
-        shutil.copyfileobj(open(img, "rb"), open(os.path.join(destination_folder, f"patient{i:04d}", imageName), "wb"))
-        shutil.copyfileobj(open(mask, "rb"), open(os.path.join(destination_folder, f"patient{i:04d}", maskName), "wb"))
+        os.makedirs(os.path.join(destination_folder, f"patient{i+startIdx:04d}"), exist_ok=True)
+        shutil.copyfileobj(open(img, "rb"), open(os.path.join(destination_folder, f"patient{i+startIdx:04d}", imageName), "wb"))
+        shutil.copyfileobj(open(mask, "rb"), open(os.path.join(destination_folder, f"patient{i+startIdx:04d}", maskName), "wb"))
         
 
 def process_one_class(path, use_class):
@@ -85,6 +85,7 @@ def run(args):
             image_paths, 
             mask_paths, 
             args.destination_folder, 
+            args.startIdx,
             args.maskName, 
             args.imageName
         )
@@ -107,6 +108,7 @@ if __name__ == "__main__":
     parser.add_argument("--image_keywords", "-ik", type=str, default=None, nargs="+", help="Keywords to search for image files.")
     parser.add_argument("--mask_keywords", "-mk", type=str, default=None, nargs="+", help="Keywords to search for mask files.")
     parser.add_argument("--destination_folder", "-o", type=str, default="data/structured", help="Folder to save the structured dataset.")
+    parser.add_argument("--startIdx", "-si", type=int, default=0, help="Start index for patient IDs.")
     parser.add_argument("--maskName", type=str, default="mask.nii.gz", help="Name of the mask files.")
     parser.add_argument("--imageName", type=str, default="image.nii.gz", help="Name of the image files.")
     parser.add_argument("--save_csv", action="store_true", help="Save the paths to a CSV file.")

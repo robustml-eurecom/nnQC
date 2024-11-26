@@ -1,4 +1,6 @@
 import numpy as np
+import os
+import re
 import torch
 import torch.optim as optim
 import torch.nn as nn
@@ -7,7 +9,9 @@ from monai.networks.nets import AutoEncoder
 from monai.networks.layers.factories import Act
 from generative.networks.nets import AutoencoderKL
 
-from transformers import CLIPProcessor, CLIPImageProcessor, CLIPTokenizerFast, CLIPModel, AutoProcessor
+import timm
+
+from transformers import CLIPProcessor, CLIPModel
 
 import sys;sys.path.append("/data/marciano/experiments/pull-QC/nnQC/nnQC/models/pytorch-ssim")
 import pytorch_ssim
@@ -15,6 +19,16 @@ import pytorch_ssim
 
 def get_device():
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def load_checkpoint(model, checkpoint_path):
+    ckpt = [f for f in os.listdir(checkpoint_path) if re.search(r'best', f)]
+    if isinstance(model, SpatialAE):
+        model.load_state_dict(torch.load(os.path.join(checkpoint_path, ckpt[0]))['autoencoderkl_state_dict'])
+    else:
+        model.load_state_dict(torch.load(os.path.join(checkpoint_path, ckpt[0]))['model'])
+    print(f'Loaded checkpoint from {os.path.join(checkpoint_path, ckpt[0])}')
+    return model
 
 
 class LargeImageAutoEncoder(nn.Module):
@@ -651,21 +665,28 @@ def ae_full_loss(recon, gt):
     return img_recon_loss + mask_recon_loss
 
 
+class InfererWrapper(nn.Module):
+    def __init__(self, inferer):
+        super(InfererWrapper, self).__init__()
+        self.inferer = inferer
+
+    def sample(self, x, **kwargs):
+        return self.inferer.sample(x, **kwargs)
+    
+    def forward(self, x, **kwargs):
+        return self.inferer.sample(x, **kwargs)
+
+
 class CLIPFeatureExtractor(nn.Module):
-    def __init__(self, text, n_classes):
+    def __init__(self, text, normalize=True):
         super(CLIPFeatureExtractor, self).__init__()
         self.model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to("cuda")
         self.processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
         self.text = text
-        self.n_classes = n_classes
+        self.normalize = normalize
         
     def encode(self, image):
         if image.shape[1] == 1:
-            image = image.repeat(1, 3, 1, 1)
-        else:
-            # we are dealing with segmentations. first argmax, then convert to 0-255, then repeat to 3 channels
-            image = torch.argmax(image, dim=1).unsqueeze(1)
-            image = (image / self.n_classes)
             image = image.repeat(1, 3, 1, 1)
             
         inputs = self.processor(
@@ -673,5 +694,23 @@ class CLIPFeatureExtractor(nn.Module):
             return_tensors="pt", 
             padding=True
         )
-        return self.model.get_image_features(**inputs.to("cuda"))
+        feat = self.model.get_image_features(**inputs.to("cuda"))
+        return torch.nn.functional.normalize(feat, p=2, dim=1)
+    
+class ResNetFeatureExtractor(nn.Module):
+    def __init__(self, backbone, n_classes, normalize=True):
+        super(ResNetFeatureExtractor, self).__init__()
+        self.backbone = timm.create_model(backbone, pretrained=True, in_chans=1)
+        self.n_classes = n_classes
+        self.normalize = normalize  
+        self.model = nn.Sequential(*list(self.backbone.children())[:-1])
+    
+    def encode(self, image):
+        if image.shape[1] > 1:
+            image = torch.argmax(image, dim=1).unsqueeze(1)
+            # scale by 255
+            image = image/(self.n_classes-1) * 255
+            
+        return torch.nn.functional.normalize(self.model(image), p=2, dim=1) if self.normalize else self.model(image)
+
         

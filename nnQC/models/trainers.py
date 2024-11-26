@@ -15,6 +15,12 @@ from monai.losses import GeneralizedDiceLoss, PerceptualLoss, PatchAdversarialLo
 from torch.optim.lr_scheduler import ExponentialLR
 
 
+def find_empty_masks(images):
+    for i in range(images.size(0)):
+        if images[i].sum() == 0:
+            return True
+    
+
 def erode_ohe_mask(mask, target_pixels=8):
     mask_np = mask.cpu().numpy()
     eroded_mask_np = np.zeros_like(mask_np)
@@ -427,8 +433,8 @@ class AutoencoderKLTrainer:
         self.dice_loss = GeneralizedDiceLoss(include_background=False)
         self.adv_loss = self._init_adversarial_loss()
 
-        self.optimizer_g = torch.optim.Adam(self.autoencoderkl.parameters(), lr=1e-4)
-        self.optimizer_d = torch.optim.Adam(self.discriminator.parameters(), lr=5e-4)
+        self.optimizer_g = torch.optim.Adam(self.autoencoderkl.parameters(), lr=5e-5)
+        self.optimizer_d = torch.optim.Adam(self.discriminator.parameters(), lr=1e-4)
 
         self.scaler_g = GradScaler()
         self.scaler_d = GradScaler()
@@ -499,15 +505,19 @@ class AutoencoderKLTrainer:
         epoch_loss = gen_epoch_loss = disc_epoch_loss = 0
         progress_bar = tqdm(enumerate(self.train_loader), ncols=110)
         progress_bar.set_description(f"Epoch {epoch}")
-
+        
         for step, batch in progress_bar:
             images = batch["seg"].to(self.device)
+
+            if find_empty_masks(images):
+                continue
             
-            loss_g = self._train_generator(images, epoch)
+            loss_g, generator_loss, reconstruction = self._train_generator(images, epoch)
             epoch_loss += loss_g.item()
 
             if epoch > self.autoencoder_warm_up_n_epochs:
-                loss_d = self._train_discriminator(images)
+                loss_d = self._train_discriminator(images, reconstruction)
+                gen_epoch_loss += generator_loss.item()
                 disc_epoch_loss += loss_d.item()
 
             progress_bar.set_postfix({
@@ -531,7 +541,7 @@ class AutoencoderKLTrainer:
             p_loss = self.perceptual_loss(reconstruction_3ch.float(), images_3ch.float())
             
             loss_g = recons_loss + (self.kl_weight * kl_loss) + (self.perceptual_weight * p_loss)
-
+            generator_loss = 0
             if epoch > self.autoencoder_warm_up_n_epochs:
                 generator_loss = self._compute_generator_loss(reconstruction)
                 loss_g += self.adv_weight * generator_loss
@@ -540,18 +550,15 @@ class AutoencoderKLTrainer:
         self.scaler_g.step(self.optimizer_g)
         self.scaler_g.update()
 
-        return loss_g
+        return loss_g, generator_loss, reconstruction
 
-    def _train_discriminator(self, images):
-        self.optimizer_d.zero_grad(set_to_none=True)
-        
+    def _train_discriminator(self, images, reconstruction): 
         with autocast(enabled=True):
-            with torch.no_grad():
-                reconstruction = self.autoencoderkl(images)[0]
+            self.optimizer_d.zero_grad(set_to_none=True)
             
             loss_d_fake = self._compute_discriminator_loss(reconstruction, False)
             loss_d_real = self._compute_discriminator_loss(images, True)
-            loss_d = self.adv_weight * (loss_d_fake + loss_d_real) * 0.5
+            loss_d = self.adv_weight * ((loss_d_fake + loss_d_real) * 0.5)
 
         self.scaler_d.scale(loss_d).backward()
         self.scaler_d.step(self.optimizer_d)
@@ -560,7 +567,7 @@ class AutoencoderKLTrainer:
         return loss_d
 
     def _compute_kl_loss(self, z_mu, z_sigma):
-        kl_loss = 0.5 * torch.sum(z_mu.pow(2) + z_sigma.pow(2) - torch.log(z_sigma.pow(2)) - 1, dim=[1, 2, 3])
+        kl_loss = 0.5 * torch.sum(z_mu.pow(2) + z_sigma.pow(2) - torch.log(z_sigma.pow(2)+ 1e-6) - 1, dim=[1, 2, 3])
         return torch.sum(kl_loss) / kl_loss.shape[0]
 
     def _compute_generator_loss(self, reconstruction):
@@ -720,16 +727,24 @@ class LDMTrainer:
             self.optimizer.zero_grad(set_to_none=True)
             prob = np.random.rand()
             
+            if find_empty_masks(segmentations):
+                continue
+            
             with autocast(enabled=True):
                 z_mu, z_sigma = self.spatial_ae.autoencoderkl.encode(segmentations)
                 z = self.spatial_ae.autoencoderkl.sampling(z_mu, z_sigma)
                 noise = torch.randn_like(z).to(self.device)
-                condition = self.feat_extractor.encode(images).to(self.device).view(segmentations.shape[0], -1).unsqueeze(1)
+                condition = self.feat_extractor.encode(images).to(self.device)
+                #condition = F.normalize(condition, p=2, dim=-1)
+                condition = condition.view(segmentations.shape[0], -1).unsqueeze(1)
+                
                 if self.mask_ae is not None:
                     holes_segmentations = torch.stack([create_holes(mask, 15, 30, 10) for mask in segmentations]) if prob < 0.5 else segmentations
-                    mask_condition = self.mask_ae.encode(holes_segmentations).to(self.device).view(segmentations.shape[0], -1).unsqueeze(1)
+                    mask_condition = self.mask_ae.encode(holes_segmentations).to(self.device)
+                    #mask_condition = F.normalize(mask_condition, p=2, dim=-1)
+                    mask_condition = mask_condition.view(segmentations.shape[0], -1).unsqueeze(1)
                     condition = torch.cat([condition, mask_condition], dim=-1)
-                    
+                
                 timesteps = torch.randint(0, self.inferer.scheduler.num_train_timesteps, (z.shape[0],), device=z.device).long()
                 noise_pred = self.inferer(
                     inputs=segmentations,

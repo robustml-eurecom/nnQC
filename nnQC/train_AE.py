@@ -8,9 +8,10 @@ import numpy as np
 import torch
 import yaml
 import argparse
+import re
 
 import torchvision
-from utils.dataset import get_transforms
+from utils.dataset import get_transforms, get_dataloader
 from models.networks import (
     ImageAutoEncoder, 
     LargeImageAutoEncoder,
@@ -29,67 +30,6 @@ from monai.visualize import matshow3d
 
 #monai.config.print_config()
 monai.utils.set_determinism(0)     
-
-
-def check_data(ds):
-    check_loader = DataLoader(ds, batch_size=1)
-    check_data = monai.utils.misc.first(check_loader)
-    print("first volume's shape: ", check_data["img"].shape, check_data["seg"].shape)
-    
-
-def get_dataloader(
-    root_dir, 
-    mode, 
-    keyword, 
-    batch_size, 
-    classes, 
-    transforms, 
-    sanity_check=False
-    ):
-    img_dir = os.path.join(root_dir, "img_training")
-    mask_dir = os.path.join(root_dir, "training")
-    images = sorted(glob(os.path.join(img_dir, f"*{keyword}*")))
-    segs = sorted(glob(os.path.join(mask_dir, f"*{keyword}*")))
-    
-    print(f"Found {len(images)} image files and {len(segs)} mask files.")
-    print(f"First image file: {images[0]}")
-    print(f"First mask file: {segs[0]}")
-    
-    total = len(images)
-    if mode=="train":
-        images = images[:int(0.8*total)]
-        segs = segs[:int(0.8*total)]
-    elif mode=="val":
-        images = images[int(0.8*total):int(0.9*total)]
-        segs = segs[int(0.8*total):int(0.9*total)]
-    
-    data = [{"img": img, "seg": seg} for img, seg in zip(images, segs)]
-    
-    transforms = get_transforms(mode, classes=classes)
-    
-    volume_ds = monai.data.CacheDataset(data=data, transform=transforms)
-    
-    patch_func = monai.data.PatchIterd(
-        keys=["img", "seg"],
-        patch_size=(1, None, None),  # dynamic last two dimensions
-        start_pos=(0, 0, 0)
-    )
-    patch_transform = get_transforms("patch", classes=classes)
-    
-    patch_ds = monai.data.GridPatchDataset(
-        data=volume_ds, patch_iter=patch_func, 
-        transform=patch_transform, with_coordinates=False
-    )
-    
-    if sanity_check:
-        check_data(patch_ds)
-        
-    return DataLoader(
-        patch_ds,
-        batch_size=batch_size,
-        num_workers=2,
-        pin_memory=torch.cuda.is_available(),
-    )
 
 
 def get_model(name, params):
@@ -132,7 +72,7 @@ def run(args):
     device = get_device()
     model = get_model(args.model, model_opts)
     model = model.to(device) if 'spatial' not in args.model else {k: v.to(device) for k, v in model.items()}
-    
+
     if 'spatial' not in args.model:
         trainer_opts = config["ae_trainer"]['standard'] 
         optimizer = torch.optim.Adam(model.parameters(), lr=model_opts['lr'])
@@ -140,7 +80,8 @@ def run(args):
         trainer_opts = config["ae_trainer"]['kl']
     
     if os.listdir(os.path.join(outputs, args.ckpt_folder)):
-        ckpt = torch.load(os.path.join(outputs, args.ckpt_folder, 'best_model.pth'))
+        best_ckpt = [f for f in os.listdir(os.path.join(outputs, args.ckpt_folder)) if re.search(r'best', f)][0]
+        ckpt = torch.load(os.path.join(outputs, args.ckpt_folder, best_ckpt))
         model.load_state_dict(ckpt['model'])
         optimizer.load_state_dict(ckpt['optimizer'])
     
@@ -164,19 +105,15 @@ def run(args):
     train_loader = get_dataloader(
         args.data_dir, 
         "train", 
-        dataset_opts['keyword'], 
         dataset_opts['batch_size'], 
         dataset_opts['classes'], 
-        get_transforms("train", dataset_opts['classes']),
         sanity_check=True
     )
     val_loader = get_dataloader(
         args.data_dir, 
         "val", 
-        dataset_opts['keyword'], 
         dataset_opts['batch_size'], 
         dataset_opts['classes'], 
-        get_transforms("val", dataset_opts['classes']),
         sanity_check=True
     )
     

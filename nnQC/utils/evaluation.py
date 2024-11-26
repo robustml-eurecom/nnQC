@@ -12,7 +12,11 @@ from PIL import Image
 from medpy.metric import binary
 from scipy import stats
 from tqdm import tqdm
-from .dataset import AddPadding, CenterCrop, OneHot
+from .dataset import AddPadding, CenterCrop, OneHot, LDMDataset
+from monai.inferers import SliceInferer
+from torch.utils.data import DataLoader
+import monai
+from collections import defaultdict
 
 from batchgenerators.augmentations.utils import resize_segmentation
 from IPython.display import display
@@ -136,42 +140,249 @@ def testing(ae, test_loader, patient_info, folder_predictions, folder_out, curre
             )
     return results
 
+
+def create_dict():
+    return {
+        'scans': [],
+        'segmentations': [],
+        'ldm_reconstructions': [],
+        'gt_masks': [],
+        'baseline_reconstructions': []
+    }
+
+def create_result_dict():
+    return {
+        'ldm': {},
+        'gt': {},
+        'baseline': {}
+    }
+
+class SubjectVolumeEvaluator:
+    def __init__(self, keys):
+        self.keys = keys
+        self.subject_volumes = defaultdict(create_dict)
+        self.subject_results = defaultdict(create_result_dict)
+
+    def add_subject_data(self, subject_id, scan, segmentation, 
+                          ldm_reconstruction, baseline_reconstruction, gt_mask):
+        """
+        Add data for a specific subject, accumulating 3D volumes
+        """
+        self.subject_volumes[subject_id]['scans'].append(scan)
+        self.subject_volumes[subject_id]['segmentations'].append(segmentation)
+        self.subject_volumes[subject_id]['ldm_reconstructions'].append(ldm_reconstruction)
+        self.subject_volumes[subject_id]['baseline_reconstructions'].append(baseline_reconstruction)
+        self.subject_volumes[subject_id]['gt_masks'].append(gt_mask)
+
+    def compute_subject_metrics(self):
+        """
+        Compute metrics for each subject by aggregating their volumes
+        """
+        for subject_id, volumes in self.subject_volumes.items():
+            # Stack volumes along first dimension to create 3D volumes
+            subject_scans = np.stack(volumes['scans'])
+            subject_segmentations = np.stack(volumes['segmentations'])
+            subject_ldm_recons = np.stack(volumes['ldm_reconstructions'])
+            subject_baseline_recons = np.stack(volumes['baseline_reconstructions'])
+            subject_gt_masks = np.stack(volumes['gt_masks'])
+
+            # Compute metrics for the subject
+            self.subject_results['ldm'][subject_id] = evaluate_metrics(
+                self.keys[1:], 
+                subject_segmentations.argmax(1), 
+                subject_ldm_recons.argmax(1)
+            )
+            self.subject_results['gt'][subject_id] = evaluate_metrics(
+                self.keys[1:], 
+                subject_segmentations.argmax(1), 
+                subject_gt_masks.argmax(1)
+            )
+            self.subject_results['baseline'][subject_id] = evaluate_metrics(
+                self.keys[1:], 
+                subject_segmentations.argmax(1), 
+                subject_baseline_recons.argmax(1)
+            )
+
+        return self.subject_results
+
+
 def ldm_testing(
-    unet, 
-    ae,
-    baseline_ae, 
-    feature_extractor, 
-    inferer, 
-    scheduler, 
-    test_loaders,
-    keys,
-    logs_folder
-):   
+    unet, ae, baseline_ae, feature_extractor, 
+    inferer, scheduler, test_loaders, 
+    start_idx, end_idx, keys, logs_folder
+):
     unet.eval()
     feature_extractor.eval()
     baseline_ae.eval()
     ae.eval()
+
+    subject_evaluator = SubjectVolumeEvaluator(keys)
+
+    results_output = os.path.join(logs_folder, "measures")
+    os.makedirs(results_output, exist_ok=True)
+    
+    temp_res = None   
+    if os.path.exists("{}/total_scores.npy".format(results_output)):
+        temp_res = np.load("{}/total_scores.npy".format(results_output), allow_pickle=True).item()
     
     with torch.no_grad():
-        results = {'ldm': {}, 'gt': {}, 'baseline': {}}
-        for patient_img, patient_mask, patient_gt in zip(test_loaders[0], test_loaders[1], test_loaders[2]):
-            id = patient_mask.dataset.id
-            print("Processing patient {:04d}".format(id))
-            prediction, reconstruction, bad_reconstruction, gt, img = process_patient(
-                patient_img, patient_mask, patient_gt, unet, ae, baseline_ae, feature_extractor, 
-                inferer, scheduler, id, logs_folder
-            )          
+        gt_loader, test_loader = test_loaders
+        
+        for batch_gt, batch_test in zip(gt_loader, test_loader):
+            subject_id = batch_test['id'] + start_idx
+            subject_id = subject_id.cpu().numpy()[0]
             
-            results['ldm']["patient{:04d}".format(id)] = evaluate_metrics(keys[1:], prediction, reconstruction)
-            results['gt']["patient{:04d}".format(id)] = evaluate_metrics(keys[1:], prediction, gt)
-            results['baseline']["patient{:04d}".format(id)] = evaluate_metrics(keys[1:], prediction, bad_reconstruction)
+            if subject_id > end_idx:
+                break
+            
+            print("Processing subject", subject_id)
+            
+            if temp_res is not None and subject_id in temp_res['ldm'].keys():
+                print("Already processed")
+                continue
+            
+            gt_masks = batch_gt['seg'].to(device)
+            segmentations = batch_test['seg'].to(device)
+            scans = batch_test['img'].to(device)
+            
+            # Process patient data
+            segmentations, reconstruction, bad_reconstruction, gt_masks, scans = process_patient(
+                scans, segmentations, gt_masks, 
+                unet, ae, baseline_ae, feature_extractor,
+                inferer, scheduler
+            )
+            
+            # Add data to subject evaluator
+            subject_evaluator.add_subject_data(
+                subject_id, 
+                scans, 
+                segmentations, 
+                reconstruction, 
+                bad_reconstruction, 
+                gt_masks
+            )
+            
+            plot_patient_results(
+                subject_id,
+                scans,
+                gt_masks.argmax(1),
+                segmentations.argmax(1),
+                bad_reconstruction.argmax(1),
+                reconstruction.argmax(1),
+                logs_folder
+            )
+            # Compute subject-level metrics
+            subject_results = subject_evaluator.compute_subject_metrics()
+            # append the dict to temp res if its not none else create a new one
+            if temp_res is None:
+                temp_res = subject_results
+            else:
+                for key in subject_results.keys():
+                    temp_res[key].update(subject_results[key])
+                    
+            np.save("{}/total_scores.npy".format(results_output), temp_res)
+    
+    subject_results = subject_evaluator.compute_subject_metrics()
+    np.save("{}/total_scores.npy".format(results_output), temp_res)
+    
+    return subject_results
 
-            round_results(results['ldm'], results['gt'], results['baseline'], id)
-            
-            print_patient_results(id, results['ldm'], results['gt'], results['baseline'])
-            plot_patient_results(id, img, gt, prediction, bad_reconstruction, reconstruction, logs_folder)
-                
-    return results
+
+def erode_random_slices(segmentations, prob=0.8):
+    target_pixels = random.choice([8, 16, 32, 64])
+    if prob < 0.7:
+        num_slices = segmentations.shape[0]
+        num_random_slices = random.randint(1, num_slices)  # Number of slices to erode
+        random_slices = random.sample(range(num_slices), num_random_slices)  # Randomly select slices
+
+        for i in random_slices:
+            segmentations[i] = erode_ohe_mask(segmentations[i], target_pixels)    
+    return segmentations
+
+
+def process_patient(scans, segmentations, gt_masks, unet, ae, baseline_ae, feature_extractor, inferer, scheduler):
+    prob = np.random.rand()
+    scans, segmentations, gt_masks = scans.to(device), segmentations.to(device), gt_masks.to(device) 
+    segmentations = erode_random_slices(segmentations, prob)
+    print("Segmentations shape:", segmentations.shape)
+    
+    print("Extracting Opinion 1:")
+    opinion1 = feature_extractor.feature_extractor.encode(scans)
+    condition = opinion1.reshape(opinion1.shape[0], -1)[:, None, :]
+    print("Opinion 1 shape:", condition.shape)
+    print("------------------------------------")
+    
+    if baseline_ae is not None:
+        print("Extracting Opinion 2:")
+        opinion2 = baseline_ae.encoder(segmentations)
+        bad_reconstruction = baseline_ae(segmentations)
+        print("Bad reconstruction shape:", bad_reconstruction.shape)
+        
+        opinion2 = opinion2.reshape(opinion2.shape[0], -1)[:, None, :]
+        print("Opinion 2 shape:", opinion2.shape)
+        
+        condition = torch.cat([condition, opinion2], dim=-1)
+        print('Final condition shape:', condition.shape)
+        print("------------------------------------")
+    
+    z = torch.rand(segmentations.shape[0], 3, 64, 64).to(device)
+    condition = condition.squeeze(0)
+    scheduler.set_timesteps(num_inference_steps=1000)
+    print("Noise shape:", z.shape)
+    
+    with autocast(device_type='cuda', enabled=True):
+        print("Generating masks:")
+        generated_masks = inferer(
+            z,
+            diffusion_model=unet,
+            scheduler=scheduler,
+            autoencoder_model=ae,
+            conditioning=condition
+        )
+    
+    print()
+    return (
+        segmentations.cpu().numpy(), 
+        generated_masks.cpu().numpy(), 
+        bad_reconstruction.cpu().numpy(), 
+        gt_masks.cpu().numpy(), 
+        scans.cpu().numpy()
+    )
+
+
+def round_results(results, results_gt, results_bad, id):
+    for key in results["patient{:04d}".format(id)].keys():
+        results["patient{:04d}".format(id)][key] = round(results["patient{:04d}".format(id)][key], 3)
+        results_gt["patient{:04d}".format(id)][key] = round(results_gt["patient{:04d}".format(id)][key], 3)
+        results_bad["patient{:04d}".format(id)][key] = round(results_bad["patient{:04d}".format(id)][key], 3)
+
+
+def print_patient_results(id, results, results_gt, results_bad):
+    print("Patient {:04d}".format(id))
+    print('GT res:', results_gt["patient{:04d}".format(id)])
+    print('LDM res:', results["patient{:04d}".format(id)])
+    print('Baseline res:', results_bad["patient{:04d}".format(id)])
+
+
+def plot_patient_results(id, img, gt, prediction, bad_reconstruction, reconstruction, logs_folder):
+    fig, ax = plt.subplots(1, 5, figsize=(15, 5))
+    slice_num = random.randint(0, img.shape[0]-1)
+    ax[0].imshow(np.rot90(img[slice_num,0,:,:], 2), cmap="gray")
+    ax[0].set_title("ROI cropped image")
+    ax[0].axis("off")
+    ax[1].imshow(np.rot90(gt[slice_num,:,:], 2), cmap="gray")
+    ax[1].set_title("Ground truth")
+    ax[1].axis("off")
+    ax[2].imshow(np.rot90(prediction[slice_num,:,:], 2), cmap="gray")
+    ax[2].set_title("Input Segmentation")
+    ax[2].axis("off")
+    ax[3].imshow(np.rot90(bad_reconstruction[slice_num,:,:], 2), cmap="gray")
+    ax[3].set_title("AE Reconstruction")
+    ax[3].axis("off")
+    ax[4].imshow(np.rot90(reconstruction[slice_num,:,:], 2), cmap="gray")
+    ax[4].set_title("LDM Generation")
+    ax[4].axis("off")
+    plt.savefig(os.path.join(logs_folder, "patient{:04d}_slice{}.png".format(id, slice_num)))
 
 
 def plot_condition_grids(condition1, condition2):
@@ -229,101 +440,6 @@ def plot_condition_grids(condition1, condition2):
     
     plt.tight_layout()
     return fig
-
-
-def process_patient(patient_img, patient_mask, patient_gt, unet, ae, baseline_ae, feature_extractor, inferer, scheduler, id, logs_folder):
-    prediction, reconstruction, bad_reconstruction, gt, img = [], [], [], [], []
-    for batch_idx, (scans, segmentations, gt_masks) in enumerate(zip(patient_img, patient_mask, patient_gt)):
-        prob = np.random.rand()
-        scans, segmentations, gt_masks = scans.to(device), segmentations.to(device), gt_masks.to(device) 
-        eroded = False
-        
-        if prob < 0.5:
-            eroded = True
-            target_pixels = random.choice([8, 16, 32, 64])
-            segmentations = torch.stack([erode_ohe_mask(mask, target_pixels) for mask in segmentations]) if prob < 0.5 else segmentations
-        condition = feature_extractor.encode(scans).to(device)
-        condition = condition.view(condition.shape[0], -1).unsqueeze(1)
-        
-        if baseline_ae is not None:
-            embeddings = baseline_ae.encode(segmentations).to(device)     
-            bad_mask = baseline_ae.decode(embeddings)
-            embeddings = embeddings.view(embeddings.shape[0], -1).unsqueeze(1)           
-            condition = torch.cat([condition, embeddings], dim=-1)
-        
-        z = torch.randn(scans.shape[0], 3, 64, 64).to(device)
-        scheduler.set_timesteps(num_inference_steps=1000)
-        
-        with autocast(device_type='cuda', enabled=True):
-            generated_masks = inferer.sample(
-                input_noise=z, diffusion_model=unet, 
-                scheduler=scheduler, autoencoder_model=ae,
-                conditioning=condition
-            )
-        
-        # split the 1600 condition in 2 parts and plot the each result 40x40 grid
-        condition1 = condition[:, :, :1600]
-        condition2 = condition[:, :, 1600:]
-        # normalize the condition to be in the range [0, 1]
-        condition1 = (condition1 - condition1.min()) / (condition1.max() - condition1.min())
-        condition2 = (condition2 - condition2.min()) / (condition2.max() - condition2.min())
-        
-        #plot two different subplots" one with 10x10 grid in which each cell is a 4x4 image, the other with 10x10 grid in which each cell is a 4x4 image
-        condition1 = condition1.view(-1, 100, 4, 4)[0].cpu().numpy()
-        condition2 = condition2.view(-1, 100, 4, 4)[0].cpu().numpy()
-        
-        # two figures, one for each condition made by 10x10 grid of 4x4 images
-        fig = plot_condition_grids(condition1, condition2)
-        plt.savefig(os.path.join(logs_folder, "patient{:04d}_conditions_erosion.png".format(id))) if eroded else plt.savefig(os.path.join(logs_folder, "patient{:04d}_conditions.png".format(id)))
-        
-        reconstruction = torch.cat([reconstruction, generated_masks], dim=0) if len(reconstruction) > 0 else generated_masks
-        prediction = torch.cat([prediction, segmentations], dim=0) if len(prediction) > 0 else segmentations
-        bad_reconstruction = torch.cat([bad_reconstruction, bad_mask], dim=0) if len(bad_reconstruction) > 0 else bad_mask
-        gt = torch.cat([gt, gt_masks], dim=0) if len(gt) > 0 else gt_masks
-        img = torch.cat([img, scans], dim=0) if len(img) > 0 else scans
-        
-    reconstruction = reconstruction.argmax(1).cpu().numpy()
-    prediction = prediction.argmax(1).cpu().numpy()
-    bad_reconstruction = bad_reconstruction.argmax(1).cpu().numpy()
-    gt = gt.argmax(1).cpu().numpy()
-    img = img.cpu().numpy()
-    
-    return prediction, reconstruction, bad_reconstruction, gt, img
-
-
-def round_results(results, results_gt, results_bad, id):
-    for key in results["patient{:04d}".format(id)].keys():
-        results["patient{:04d}".format(id)][key] = round(results["patient{:04d}".format(id)][key], 3)
-        results_gt["patient{:04d}".format(id)][key] = round(results_gt["patient{:04d}".format(id)][key], 3)
-        results_bad["patient{:04d}".format(id)][key] = round(results_bad["patient{:04d}".format(id)][key], 3)
-
-
-def print_patient_results(id, results, results_gt, results_bad):
-    print("Patient {:04d}".format(id))
-    print('GT res:', results_gt["patient{:04d}".format(id)])
-    print('LDM res:', results["patient{:04d}".format(id)])
-    print('Baseline res:', results_bad["patient{:04d}".format(id)])
-
-
-def plot_patient_results(id, img, gt, prediction, bad_reconstruction, reconstruction, logs_folder):
-    fig, ax = plt.subplots(1, 5, figsize=(15, 5))
-    slice_num = random.randint(0, img.shape[1]-1)
-    ax[0].imshow(np.rot90(img[slice_num,0,:,:], 2), cmap="gray")
-    ax[0].set_title("ROI cropped image")
-    ax[0].axis("off")
-    ax[1].imshow(np.rot90(gt[slice_num,:,:], 2), cmap="gray")
-    ax[1].set_title("Ground truth")
-    ax[1].axis("off")
-    ax[2].imshow(np.rot90(prediction[slice_num,:,:], 2), cmap="gray")
-    ax[2].set_title("Input Segmentation")
-    ax[2].axis("off")
-    ax[3].imshow(np.rot90(bad_reconstruction[slice_num,:,:], 2), cmap="gray")
-    ax[3].set_title("AE Reconstruction")
-    ax[3].axis("off")
-    ax[4].imshow(np.rot90(reconstruction[slice_num,:,:], 2), cmap="gray")
-    ax[4].set_title("LDM Generation")
-    ax[4].axis("off")
-    plt.savefig(os.path.join(logs_folder, "patient{:04d}_slice5.png".format(id)))
 
 
 def display_image(img):

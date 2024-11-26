@@ -9,6 +9,8 @@ import glob
 
 from scipy.ndimage import binary_fill_holes
 from batchgenerators.augmentations.utils import resize_segmentation, resize
+from .dataset import get_transforms
+from monai.data.utils import decollate_batch
 
 
 def crop_image(image):
@@ -80,6 +82,7 @@ def generate_patient_info(folder, patient_ids, start_idx=0):
         patient_info[id+start_idx]["spacing"] = spacing[:3]
         patient_info[id+start_idx]["header"] = header
         patient_info[id+start_idx]["affine"] = affine
+        patient_info[id+start_idx]["orientation"] = "".join(nib.aff2axcodes(affine))
         patient_info[id+start_idx]["non_zero_slices"] = non_zero_slices
     return patient_info
   
@@ -134,24 +137,63 @@ def preprocess(patient_ids, start_idx, patient_info, spacing_target, folder, fol
         images.append(image)
         images = np.vstack(images)
         np.save(os.path.join(folder_out, "patient{:04d}".format(id+start_idx)), images.astype(np.float32))
+
+
+def preprocess_monai(
+    patient_ids, 
+    start_idx, 
+    patient_info, 
+    loader,
+    folder, 
+    folder_out,
+    isTest=False
+):
+    #progress_bar = tqdm(patient_ids, desc="Preprocessing")
+    fingerprints = {}
+    missing = 0
+    folder_out = os.path.join(folder_out, 'training') if not isTest else os.path.join(folder_out, 'testing')
+    for id, batch in zip(patient_ids, loader):
+        #progress_bar.set_postfix_str(f"Patient {id}. Missing: {missing}/{len(patient_ids)}")
+        if id not in patient_info:
+            missing += 1
+            tqdm.write(f"Patient {id} is missing info")
+            continue
+        fingerprints['id'] = patient_info[id+start_idx]
+        fingerprints['id']['root_dir'] = folder
+
+        fingerprints['id']['output_dir'] = folder_out
         
+        loader_transforms = get_transforms(
+            mode='loader',
+            classes=2,
+            fingerprints=fingerprints['id']
+        )
+        prepro_transforms = get_transforms(
+            mode='saver',
+            classes=2,
+            fingerprints=fingerprints['id']
+        )
+        
+        loaded_data = loader_transforms(decollate_batch(batch))
+        _ = prepro_transforms(loaded_data)
+        
+        print(f"Preprocessed patient {id}\n")
+    
+    return fingerprints 
+     
 
 def apply_preprocessing(
-    patient_ids, start_idx, patient_info, spacing_target, folder, folder_out, 
-    get_patient_folder, get_fname, raw=False
-    ):
+    patient_ids, start_idx, patient_info, loader, folder, folder_out, isTest):
     if not os.path.exists(folder_out):
         os.makedirs(folder_out)
-    preprocess(
-        patient_ids, 
+    preprocess_monai(
+        patient_ids,
         start_idx,
-        patient_info, 
-        spacing_target,
-        folder, 
-        folder_out, 
-        get_patient_folder, 
-        get_fname, 
-        raw
+        patient_info,
+        loader,
+        folder,
+        folder_out,
+        isTest
     )
     
 
@@ -173,10 +215,9 @@ def find_segmentations(root_dir: os.PathLike, keywords: list, absolute: bool = F
         if os.path.isdir(subPath):
             segmentations.append(find_segmentations(subPath, keywords, absolute))
         else:
-            for keyword in keywords:
-                if keyword in subPath:
-                    path = os.path.join(cwd, subPath)
-                    segmentations.append(path)
+            if all(keyword in subPath for keyword in keywords):
+                path = os.path.join(cwd, subPath)
+                segmentations.append(path)
 
     return np.unique(np.hstack(segmentations))
 

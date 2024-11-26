@@ -10,7 +10,7 @@ import yaml
 import argparse
 
 from utils.dataset import get_dataloader, get_transforms
-from nnQC.nnQC.models.networks import (
+from nnQC.models.networks import (
     ImageAutoEncoder, 
     LargeImageAutoEncoder,
     MaskAutoEncoder, 

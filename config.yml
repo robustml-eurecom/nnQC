@@ -13,7 +13,7 @@ ae:
     n_channels: 2
     z_dim: 100
     loss_functions: ['BKGDLoss', 'MSELoss']
-    keys: ['BK_', 'Spleen']
+    keys: ['BK_', 'Skull_']
     ckpt_path: 'mask-ae_outputs/checkpoints'
     loss_args:
       settling_epochs_BKGDLoss: 10
@@ -52,10 +52,9 @@ ldm:
 
 dataset:
   batch_size: 5
-  keyword: "*npy"
   classes: 2
-  id_start: 1360
-  id_end: 1432
+  id_start: 288
+  id_end: 320
 
 ae_trainer:
   standard:
@@ -63,7 +62,7 @@ ae_trainer:
     val_interval: 1
   kl:
     epochs: 50
-    autoencoder_warm_up_n_epochs: 2
+    autoencoder_warm_up_n_epochs: 5
     val_interval: 5
     kl_weight: 0.000001
     perceptual_weight: 0.001
@@ -80,7 +79,7 @@ gan_trainer:
     settling_epochs_BKMSELoss: 0
   
 ldm_trainer:
-  epochs: 400
+  epochs: 200
   val_interval: 5
   lr_start: 0.00001
   lr_end: 0.000002

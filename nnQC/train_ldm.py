@@ -9,15 +9,22 @@ import torch
 import yaml
 import argparse
 import re
+import shutil
 
 from torch.cuda.amp import autocast
+from torchvision.models import (
+    resnet18,
+    resnet50
+)
 from utils.dataset import get_dataloader, get_transforms
 from models.networks import (
     LargeImageAutoEncoder, 
     ConvAE,
     SpatialAE,
     CLIPFeatureExtractor,
-    get_device
+    ResNetFeatureExtractor,
+    get_device,
+    load_checkpoint
 )
 from models.trainers import LDMTrainer
 
@@ -26,16 +33,6 @@ from generative.networks.schedulers import DDPMScheduler
 from generative.inferers import LatentDiffusionInferer
 
 monai.utils.set_determinism(0)     
-
-
-def load_checkpoint(model, checkpoint_path):
-    ckpt = [f for f in os.listdir(checkpoint_path) if re.search(r'best', f)]
-    if isinstance(model, SpatialAE):
-        model.load_state_dict(torch.load(os.path.join(checkpoint_path, ckpt[0]))['autoencoderkl_state_dict'])
-    else:
-        model.load_state_dict(torch.load(os.path.join(checkpoint_path, ckpt[0]))['model'])
-    print(f'Loaded checkpoint from {os.path.join(checkpoint_path, ckpt[0])}')
-    return model
 
 def run(args):
     #open config yaml file
@@ -54,8 +51,15 @@ def run(args):
     spatial_model_opts = config["ae"]['spatial-ae']
     dataset_opts = config["dataset"]
     
+    spatial_ae = load_checkpoint(
+        SpatialAE(**spatial_model_opts['generator']),
+        os.path.join(
+            args.experiment_name,
+            spatial_model_opts['ckpt_path'])
+        )
+    
     device = get_device()
-    if not args.use_clip:
+    if not args.pretrained:
         feature_extractor = load_checkpoint(
             LargeImageAutoEncoder(**img_model_opts), 
             os.path.join(
@@ -69,17 +73,9 @@ def run(args):
                 mask_model_opts['ckpt_path'])
             )
     else:
-        assert args.clip_text is not None, "Please provide text for CLIP"
-        clip_text = "A segmentation of a " + args.clip_text
         feature_extractor = CLIPFeatureExtractor(None, dataset_opts['classes'])
-        mask_ae = CLIPFeatureExtractor(clip_text, dataset_opts['classes'])
+        mask_ae = ResNetFeatureExtractor('resnet18', dataset_opts['classes'])
         
-    spatial_ae = load_checkpoint(
-        SpatialAE(**spatial_model_opts['generator']),
-        os.path.join(
-            args.experiment_name,
-            spatial_model_opts['ckpt_path'])
-        )
     
     feature_extractor = feature_extractor.to(device)
     mask_ae = mask_ae.to(device)
@@ -92,19 +88,15 @@ def run(args):
     train_loader = get_dataloader(
         args.data_dir, 
         "train", 
-        dataset_opts['keyword'], 
         dataset_opts['batch_size'], 
         dataset_opts['classes'], 
-        get_transforms("train", dataset_opts['classes']),
         sanity_check=True
     )
     val_loader = get_dataloader(
         args.data_dir, 
         "val", 
-        dataset_opts['keyword'], 
         dataset_opts['batch_size'], 
         dataset_opts['classes'], 
-        get_transforms("val", dataset_opts['classes']),
         sanity_check=True
     )
     
@@ -132,7 +124,6 @@ def run(args):
         print("Loaded checkpoint")
     
     ldm_trainer_opts = config["ldm_trainer"]
-    # compute gamma for the exponential lr scheduler given lr start and end and num steps
     num_steps = ldm_trainer_opts['epochs'] * sum(1 for _ in train_loader)
     ldm_trainer_opts['gamma'] = (ldm_trainer_opts['lr_end'] / ldm_trainer_opts['lr_start'])**(1/num_steps)
     trainer = LDMTrainer(
@@ -159,8 +150,7 @@ if __name__ == "__main__":
     parser.add_argument('--config', '-c', default='config.yml', type=str, help='Path to config file')
     parser.add_argument('--data_dir', '-d', default='preprocessed', type=str, help='Path to data directory')
     parser.add_argument('--ckpt_folder', '-ckpt', default='checkpoints', type=str, help='Folder to save checkpoints')
-    parser.add_argument('--use_clip', action='store_true', help='Use CLIP feature extractor')
-    parser.add_argument('--clip_text', default=None, type=str, help='Text for CLIP')
+    parser.add_argument('--pretrained', action='store_true', help='Use CLIP/ResNet18 feature extractor')
     parser.add_argument('--experiment_name', '-e', default=None, type=str, help='Name of experiment')
     parser.add_argument('--log_folder', '-l', default='logs', type=str, help='Folder to save logs')
     args = parser.parse_args()

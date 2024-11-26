@@ -2,10 +2,8 @@ data
 preprocessed
 results
 nnQC/test.ipynb
-experiments/liver_ct
-experiments/acdc
-experiments/prostatex
-experiments/spleen_totalseg
+experiments
+.venv
 
 *.pyc
 *.vscode
@@ -16,3 +14,4 @@ experiments/spleen_totalseg
 *.html
 *.png
 *.pth
+

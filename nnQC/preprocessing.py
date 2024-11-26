@@ -2,6 +2,10 @@ import os
 import numpy as np
 from utils.preprocess import generate_patient_info, apply_preprocessing
 import argparse
+from glob import glob
+import nibabel as nib
+import monai
+
 
 def compute_crop_spacing(patient_info):
     crops = []
@@ -27,7 +31,7 @@ def get_patient_ids(folder):
 def run(args):
     fingerprints = {}
     patient_ids = get_patient_ids(args.raw_folder)
-    
+        
     print(f"Found {len(patient_ids)} patients")
     
     os.makedirs(args.folder_out, exist_ok=True)
@@ -39,26 +43,33 @@ def run(args):
     if args.test:
         patient_info = {**patient_info, **generate_patient_info(args.raw_folder, patient_ids, args.start_idx)}
         np.save(os.path.join(args.folder_out, "patient_info.npy"), patient_info)
-    
-    median_crop, spacing_target = compute_crop_spacing(patient_info)
-    fingerprints['crop'] = median_crop
-    fingerprints['spacing'] = spacing_target
-    np.save(os.path.join(args.folder_out, "fingerprints.npy"), fingerprints)
+ 
 
-    get_folder = lambda folder, id: os.path.join(folder, 'patient{:04d}'.format(id))
-    split_folder = args.raw_folder.split('/')[-1]
-    mask_folder_out = os.path.join(args.folder_out, split_folder)
-    image_folder_out = os.path.join(args.folder_out, "img_" + split_folder)
+    images = sorted(glob(os.path.join(args.raw_folder, "**", "*image.nii.gz")))
+    segs = sorted(glob(os.path.join(args.raw_folder, "**", "*mask.nii.gz")))
+
+    data = [{"img": img, "seg": seg, "id": i} for i, (img, seg) in enumerate(zip(images, segs))]
+    print(data[0])
+
+    print()
+    print("Dataset loading")
+
+    volume_ds = monai.data.CacheDataset(data=data)
+    loader = monai.data.DataLoader(volume_ds, batch_size=1, num_workers=4)
+    print()
     
     print('Preprocessing files...')
-    apply_preprocessing(
-        patient_ids, args.start_idx, patient_info, fingerprints['spacing'], args.raw_folder, mask_folder_out, 
-        get_folder, lambda patient_info, id: "mask.nii.gz",
-        raw=False)
-    apply_preprocessing(
-        patient_ids, args.start_idx, patient_info, fingerprints['spacing'], args.raw_folder, image_folder_out, 
-        get_folder, lambda patient_info, id: "image." + args.imgfrmt,
-        raw=True)
+    fingerprints = apply_preprocessing(
+        patient_ids,
+        args.start_idx,
+        patient_info,
+        loader,
+        args.raw_folder,
+        args.folder_out,
+        args.test
+    )
+        
+    np.save(os.path.join(args.folder_out, "fingerprints.npy"), fingerprints)
     print('Preprocessing complete')
         
 
@@ -67,7 +78,6 @@ if __name__ == "__main__":
     parser.add_argument('--raw_folder', default='data/training', type=str, help='Folder containing mask images')
     parser.add_argument('--folder_out', default='preprocessed', type=str, help='Folder to save fingerprints')
     parser.add_argument('--test', '-t', action='store_true', help='Use test data')
-    parser.add_argument('--imgfrmt', '-if', default='nii.gz', type=str, help='Format of the images')
     parser.add_argument('--start_idx', '-s', default=0, type=int, help='Start index')
     args = parser.parse_args()
     

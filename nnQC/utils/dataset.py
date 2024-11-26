@@ -1,5 +1,6 @@
 import os
 import numpy as np
+import nibabel as nib
 import torch
 from batchgenerators.augmentations.utils import resize_segmentation
 
@@ -10,59 +11,64 @@ from monai.transforms import (
     LoadImaged,
     Resized,
     ScaleIntensityd,
+    NormalizeIntensityd,
     SqueezeDimd,
     SpatialPadd,
     AsDiscreted,
+    Lambdad,
+    CropForegroundd,
+    Orientationd,
+    Spacingd,
+    SaveImaged,
+    Rotate90d
 ) 
 import monai
 from monai.data import DataLoader
 from glob import glob
 import random
 
+
 def check_data(ds):
     check_loader = DataLoader(ds, batch_size=1)
     check_data = monai.utils.misc.first(check_loader)
     print("first volume's shape: ", check_data["img"].shape, check_data["seg"].shape)
     
-
 def get_dataloader(
     root_dir, 
     mode, 
-    keyword, 
     batch_size, 
     classes, 
-    transforms, 
     sanity_check=False
     ):
-    img_dir = os.path.join(root_dir, "img_training")
-    mask_dir = os.path.join(root_dir, "training")
-    images = sorted(glob(os.path.join(img_dir, f"*{keyword}*")))
-    segs = sorted(glob(os.path.join(mask_dir, f"*{keyword}*")))
+    file_dir = os.path.join(root_dir, "training")
+    print("File dir: ", file_dir)   
+    images = sorted(glob(os.path.join(file_dir, "**", "*image_preprocessed.nii.gz"), recursive=True))
+    segs = sorted(glob(os.path.join(file_dir, "**", "*mask_preprocessed.nii.gz"), recursive=True))
     
     total = len(images)
     if mode=="train":
         images = images[:int(0.8*total)]
         segs = segs[:int(0.8*total)]
     elif mode=="val":
-        images = images[int(0.8*total):int(0.9*total)]
-        segs = segs[int(0.8*total):int(0.9*total)]
-    elif mode=="test":
-        images = images[int(0.9*total):]
-        segs = segs[int(0.9*total):]
+        images = images[int(0.8*total):]
+        segs = segs[int(0.8*total):]
     
-    data = [{"img": img, "seg": seg} for img, seg in zip(images, segs)]
-    
-    transforms = get_transforms(mode, classes=classes)
-    
+    data = [{"img": img, "seg": seg, "id": i} for i, (img, seg) in enumerate(zip(images, segs))]
+    data = [d for d in data if nib.load(d['seg']).get_fdata().shape[-1] > 2]
+
+    transforms = get_transforms(mode, classes)
     
     volume_ds = monai.data.CacheDataset(data=data, transform=transforms)
     
+    if sanity_check:
+        check_data(volume_ds)
+        
     patch_func = monai.data.PatchIterd(
         keys=["img", "seg"],
-        patch_size=(1, None, None),  # dynamic last two dimensions
+        patch_size=(None, None, 1),  # dynamic last two dimensions
         start_pos=(0, 0, 0)
     )
-    patch_transform = get_transforms("patch", classes=classes)
+    patch_transform = get_transforms("patch", classes)
     
     patch_ds = monai.data.GridPatchDataset(
         data=volume_ds, patch_iter=patch_func, 
@@ -80,6 +86,59 @@ def get_dataloader(
         shuffle=False
     )
 
+def get_test_dataloader(
+    root_dir, 
+    ids,
+    classes, 
+    fingerprints,
+    sanity_check=False
+    ):
+    start_idx, end_idx = ids
+    #img_dir = os.path.join(root_dir, "img_testing")
+    #mask_dir = os.path.join(root_dir, "testing")
+    file_dir = os.path.join(root_dir, "testing")
+    images = sorted(glob(os.path.join(file_dir, "**", "image_preprocessed.nii.gz"), recursive=True))
+    segs = sorted(glob(os.path.join(file_dir, "**", "mask_preprocessed.nii.gz"), recursive=True))
+    
+    data = [{"img": img, "seg": seg, "id": i} for i, (img, seg) in enumerate(zip(images, segs))]
+    data = [d for d in data if nib.load(d['seg']).get_fdata().shape[-1] > 2]
+    
+    random_sample = data[0]
+    print("Random sample: ", random_sample)
+    random_sample = random_sample['img']
+    random_sample = nib.load(random_sample).get_fdata()
+    print("Un-processed shape: ", random_sample.shape)
+    print()
+    
+    transforms = get_transforms("test", classes=classes, fingerprints=fingerprints)
+    volume_ds = monai.data.CacheDataset(data=data, transform=transforms)
+    
+    if sanity_check:
+        check_data(volume_ds)
+
+    patch_func = monai.data.PatchIterd(
+        keys=["img", "seg"],
+        patch_size=(None, None, 1),  # dynamic first two dimensions
+        start_pos=(0, 0, 0)
+    )
+    patch_transform = get_transforms("patch", classes=classes, fingerprints=fingerprints)
+    
+    patch_ds = monai.data.GridPatchDataset(
+        data=volume_ds, patch_iter=patch_func, 
+        transform=patch_transform, with_coordinates=False
+    )
+    
+    if sanity_check:
+        check_data(patch_ds)
+        
+    return DataLoader(
+        patch_ds,
+        batch_size=3,
+        num_workers=2,
+        pin_memory=torch.cuda.is_available(),
+        shuffle=False
+    )
+    
 
 class Resizer(object):
     def __init__(self, output_size):
@@ -177,6 +236,7 @@ class Patient(torch.utils.data.Dataset):
         self.multi = multi
         self.forceToOne = forceToOne
         self.isimg = isimg
+        print("MESCIO THE BEST")
         
     def __len__(self):
         return (self.info['crop'][-1].stop - self.info['crop'][-1].start)
@@ -184,19 +244,17 @@ class Patient(torch.utils.data.Dataset):
     def __getitem__(self, slice_id):
         data = np.load(os.path.join(self.root_dir, "patient{:04d}.npy".format(self.id)))
         sample = data[slice_id]
-        #print(sample.shape, self.__len__(), slice_id)
         if self.transform:
             if self.forceToOne:
                 sample = np.where(sample!=0, 1, 0)
-            if self.isimg:
-                sample = sample[None,:,:]
-                sample = self.transform(sample)
-                sample = sample[0].numpy()
-                sample = AddPadding((256, 256))(sample)
-                sample = CenterCrop((256, 256))(sample)
-                sample = sample[None,:,:]    
-            else:
-                sample = self.transform(sample) 
+            #if self.isimg:
+            sample = sample[None,:,:]
+            sample = self.transform(sample)
+            #    sample = self.transform(sample)
+            #    sample = sample[0].numpy()
+            #    sample = AddPadding((256, 256))(sample)
+            #    sample = CenterCrop((256, 256))(sample)
+            #    sample = sample[None,:,:] 
             
         if self.condition:
             return sample, slice_id/self.__len__()
@@ -230,6 +288,7 @@ class TestDataLoader():
         self.multi = multi
         self.forceToOne = forceToOne
         self.patient_loaders = []
+        print("MESCIO THE BEST")
         if batch_size is not None:
             for id in self.patient_ids:
                 self.patient_loaders.append(torch.utils.data.DataLoader(
@@ -274,32 +333,70 @@ class TestDataLoader():
         return self.patient_ids[self.counter_id]
 
 
-def get_transforms(mode, classes):
-    if mode == "train":
+from torch.utils.data import DataLoader, Dataset
+
+class LDMDataset(Dataset):
+    def __init__(self, z, condition):
+        self.z = z
+        self.condition = condition
+
+    def __len__(self):
+        return self.z.shape[0]
+
+    def __getitem__(self, idx):
+        return self.z[idx], self.condition[idx]
+
+
+def get_transforms(mode, classes=None, fingerprints=None):
+    if mode == "loader":
         return Compose(
             [
                 LoadImaged(keys=["img", "seg"]),
                 EnsureChannelFirstd(keys=["img", "seg"]),
-                ScaleIntensityd(keys="img"),
                 EnsureTyped(keys=["img", "seg"]),
+                Spacingd(
+                    keys=["img", "seg"], 
+                    pixdim=fingerprints['spacing'], 
+                    mode=("bilinear", "nearest")
+                    ),
+                Orientationd(keys=["img", "seg"], axcodes='RAS'),
+                CropForegroundd(keys=["img", "seg"], source_key="seg"),
+                ScaleIntensityd(keys="img"),
+                Rotate90d(keys=["img", "seg"], spatial_axes=(0, 1)),
             ]
         )
-    elif mode == "val" or mode == "test":
+        
+    elif mode == "saver":
+        return Compose(
+            [
+                EnsureTyped(keys=["img", "seg"]), 
+                SaveImaged(
+                    keys=["img", "seg"], 
+                    data_root_dir=fingerprints['root_dir'],
+                    output_dir=fingerprints['output_dir'],
+                    output_postfix="preprocessed",
+                    output_ext=".nii.gz"
+                    )
+            ]
+        )
+    
+    elif mode == "train" or mode == "val":
         return Compose(
             [
                 LoadImaged(keys=["img", "seg"]),
                 EnsureChannelFirstd(keys=["img", "seg"]),
-                ScaleIntensityd(keys="img"),
                 EnsureTyped(keys=["img", "seg"]),
             ]
         )
-    elif mode == "patch":
+    
+    elif mode=='patch':
+        assert classes is not None, "Classes must be provided for patch mode"
         return Compose(
             [
-                SqueezeDimd(keys=["img", "seg"], dim=0),  # squeeze the last dim
+                SqueezeDimd(keys=["img", "seg"], dim=-1),  # squeeze the last dim
                 Resized(keys=["img", "seg"], spatial_size=[128, 128]),
                 SpatialPadd(keys=["img", "seg"], spatial_size=[256, 256]),
-                AsDiscreted(keys=["seg"], to_onehot=classes),
+                AsDiscreted(keys=["seg"], to_onehot=classes, dim=0),
             ]
         )
 

@@ -11,16 +11,16 @@ import argparse
 import re
 
 from torch.cuda.amp import autocast
-from utils.dataset import get_dataloader, get_transforms
+from utils.dataset import get_test_dataloader, get_transforms
 from utils.evaluation import ldm_testing
 from models.networks import (
     LargeImageAutoEncoder, 
     ConvAE,
     SpatialAE,
+    InfererWrapper,
     get_device
 )
-from models.trainers import LDMTrainer
-from monai.transforms import Compose, Resize, ScaleIntensity, EnsureType
+from monai.transforms import Compose, Resize, ScaleIntensity, EnsureType, SpatialPad, AsDiscrete, EnsureChannelFirst
 from utils.dataset import TestDataLoader, AddPadding, CenterCrop, OneHot, ToTensor, Resizer
 import random
 import torchvision
@@ -92,15 +92,32 @@ def run(args):
     scheduler = DDPMScheduler(**ldm_opts['ddpm'])
     
     dataset_opts = config["dataset"]
-    test_loader = get_dataloader(
-        args.data_dir, 
-        "test", 
-        dataset_opts['keyword'], 
-        1, 
+    sample = nib.load(glob(os.path.join(args.data_dir, "testing", "**", "*.nii.gz"))[5])
+    x, y, z = nib.aff2axcodes(sample.affine)
+    axcodes = x + y + z
+    spacing = sample.header.get_zooms()
+    
+    print("Orientation: ", axcodes)
+    print("Spacing: ", spacing)
+    
+    fingerprints = {    
+        "axcodes": axcodes,
+        "spacing": spacing,
+        "shape": sample.shape
+    }
+    
+    print()
+    print("Processing test data from index {} to {}".format(dataset_opts['id_start'], dataset_opts['id_end']))
+    test_loader = get_test_dataloader(
+        args.data_dir,
+        [dataset_opts['id_start'], dataset_opts['id_end']],
+        dataset_opts['keyword'],
         dataset_opts['classes'], 
-        get_transforms("test", dataset_opts['classes']),
-        sanity_check=True
+        fingerprints,
+        True
     )
+    
+    gt_loader = test_loader
     
     with torch.no_grad():
         with autocast(enabled=True):
@@ -111,61 +128,27 @@ def run(args):
 
     print(f"Scaling factor set to {1/torch.std(z)}")
     print("Finished setup")
-    print("Start testing------------------------------------------")
+    print()
+    print("Start testing")
+    print()
     
     scale_factor = 1 / torch.std(z)
-    inferer = LatentDiffusionInferer(scheduler, scale_factor)
+    ldm_inferer = LatentDiffusionInferer(scheduler, scale_factor)
+    inferer = InfererWrapper(ldm_inferer)
     
     os.makedirs(args.results_folder, exist_ok=True)
-    
-    test_loaders = {}
-
-    transform_monai = Compose([   
-        Resize(spatial_size=(128, 128)),
-        ScaleIntensity(),
-        EnsureType()         
-    ])
-
-    transform = torchvision.transforms.Compose([
-        Resizer((128,128)),
-        AddPadding((256,256)),
-        CenterCrop((256,256)),
-        OneHot(dataset_opts['classes']),
-        ToTensor()
-    ])
-    
-    test_loaders_img = TestDataLoader(
-        f"{args.data_dir}/img_testing", 
-        patient_ids=range(dataset_opts['id_start']+args.start_idx, dataset_opts['id_end']+args.start_idx+1), 
-        batch_size=2,
-        transform=transform_monai,
-        isimg=True
-        )
-    test_loaders = TestDataLoader(
-        f"{args.data_dir}/testing", 
-        patient_ids=range(dataset_opts['id_start']+args.start_idx, dataset_opts['id_end']+args.start_idx+1), 
-        batch_size=2,
-        transform=transform
-        )
-    gt_test_loaders = TestDataLoader(
-        f"{args.data_dir}/testing", 
-        patient_ids=range(dataset_opts['id_start']+args.start_idx, dataset_opts['id_end']+args.start_idx+1), 
-        batch_size=2,
-        transform=transform
-        )
-    
-    #for model in sorted(test_loaders.keys()):
-    #print("Processing segmentation model", model)
-    
+      
     keys = [f'Class {i}' for i in range(dataset_opts['classes'])]
     results = ldm_testing(
         unet, 
         spatial_ae,
-        mask_ae,
-        feature_extractor,
-        inferer,
-        scheduler,
-        [test_loaders_img, test_loaders, gt_test_loaders],
+        mask_ae, 
+        feature_extractor, 
+        inferer, 
+        scheduler, 
+        [gt_loader, test_loader],
+        dataset_opts['id_start'],
+        dataset_opts['id_end'],
         keys,
         args.results_folder
     )
