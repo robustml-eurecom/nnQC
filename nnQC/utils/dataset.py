@@ -90,10 +90,8 @@ def get_test_dataloader(
     root_dir, 
     ids,
     classes, 
-    fingerprints,
     sanity_check=False
     ):
-    start_idx, end_idx = ids
     #img_dir = os.path.join(root_dir, "img_testing")
     #mask_dir = os.path.join(root_dir, "testing")
     file_dir = os.path.join(root_dir, "testing")
@@ -110,7 +108,7 @@ def get_test_dataloader(
     print("Un-processed shape: ", random_sample.shape)
     print()
     
-    transforms = get_transforms("test", classes=classes, fingerprints=fingerprints)
+    transforms = get_transforms("val", classes=classes)
     volume_ds = monai.data.CacheDataset(data=data, transform=transforms)
     
     if sanity_check:
@@ -121,7 +119,7 @@ def get_test_dataloader(
         patch_size=(None, None, 1),  # dynamic first two dimensions
         start_pos=(0, 0, 0)
     )
-    patch_transform = get_transforms("patch", classes=classes, fingerprints=fingerprints)
+    patch_transform = get_transforms("patch", classes=classes)
     
     patch_ds = monai.data.GridPatchDataset(
         data=volume_ds, patch_iter=patch_func, 
@@ -133,7 +131,7 @@ def get_test_dataloader(
         
     return DataLoader(
         patch_ds,
-        batch_size=3,
+        batch_size=10,
         num_workers=2,
         pin_memory=torch.cuda.is_available(),
         shuffle=False
@@ -396,6 +394,18 @@ def get_transforms(mode, classes=None, fingerprints=None):
                 SqueezeDimd(keys=["img", "seg"], dim=-1),  # squeeze the last dim
                 Resized(keys=["img", "seg"], spatial_size=[128, 128]),
                 SpatialPadd(keys=["img", "seg"], spatial_size=[256, 256]),
+                AsDiscreted(keys=["seg"], to_onehot=classes, dim=0),
+            ]
+        )
+    
+    elif mode=='patch-pretr':
+        assert classes is not None, "Classes must be provided for patch mode"
+        return Compose(
+            [
+                SqueezeDimd(keys=["img", "seg"], dim=-1),  # squeeze the last dim
+                Resized(keys=["img", "seg"], spatial_size=[128, 128]),
+                SpatialPadd(keys=["img", "seg"], spatial_size=[256, 256]),
+                Resized(keys=["seg"], spatial_size=[244, 244]),
                 AsDiscreted(keys=["seg"], to_onehot=classes, dim=0),
             ]
         )

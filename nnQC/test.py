@@ -10,7 +10,7 @@ import yaml
 import argparse
 import re
 
-from torch.cuda.amp import autocast
+from torch.amp import autocast
 from utils.dataset import get_test_dataloader, get_transforms
 from utils.evaluation import ldm_testing
 from models.networks import (
@@ -24,11 +24,14 @@ from monai.transforms import Compose, Resize, ScaleIntensity, EnsureType, Spatia
 from utils.dataset import TestDataLoader, AddPadding, CenterCrop, OneHot, ToTensor, Resizer
 import random
 import torchvision
-from generative.networks.nets import DiffusionModelUNet
+from models.diffusion_model_unet import DiffusionModelUNet
 from generative.networks.schedulers import DDPMScheduler
 from generative.inferers import LatentDiffusionInferer
 
 monai.utils.set_determinism(0)     
+
+import warnings
+warnings.filterwarnings("ignore")
 
 
 def load_checkpoint(model, checkpoint_path):
@@ -92,35 +95,20 @@ def run(args):
     scheduler = DDPMScheduler(**ldm_opts['ddpm'])
     
     dataset_opts = config["dataset"]
-    sample = nib.load(glob(os.path.join(args.data_dir, "testing", "**", "*.nii.gz"))[5])
-    x, y, z = nib.aff2axcodes(sample.affine)
-    axcodes = x + y + z
-    spacing = sample.header.get_zooms()
-    
-    print("Orientation: ", axcodes)
-    print("Spacing: ", spacing)
-    
-    fingerprints = {    
-        "axcodes": axcodes,
-        "spacing": spacing,
-        "shape": sample.shape
-    }
     
     print()
     print("Processing test data from index {} to {}".format(dataset_opts['id_start'], dataset_opts['id_end']))
     test_loader = get_test_dataloader(
         args.data_dir,
         [dataset_opts['id_start'], dataset_opts['id_end']],
-        dataset_opts['keyword'],
         dataset_opts['classes'], 
-        fingerprints,
         True
     )
     
     gt_loader = test_loader
     
     with torch.no_grad():
-        with autocast(enabled=True):
+        with autocast(device_type="cuda", enabled=True):
             check_data = monai.utils.misc.first(test_loader) 
             z = spatial_ae.autoencoderkl.encode_stage_2_inputs(
                 check_data["seg"].to(device)

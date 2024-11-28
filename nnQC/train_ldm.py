@@ -28,7 +28,8 @@ from models.networks import (
 )
 from models.trainers import LDMTrainer
 
-from generative.networks.nets import DiffusionModelUNet
+#from generative.networks.nets import DiffusionModelUNet
+from models.diffusion_model_unet import DiffusionModelUNet
 from generative.networks.schedulers import DDPMScheduler
 from generative.inferers import LatentDiffusionInferer
 
@@ -59,6 +60,7 @@ def run(args):
         )
     
     device = get_device()
+    
     if not args.pretrained:
         feature_extractor = load_checkpoint(
             LargeImageAutoEncoder(**img_model_opts), 

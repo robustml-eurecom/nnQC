@@ -5,7 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import random
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 from medpy.metric import binary
 from scipy.ndimage import binary_erosion
 from .networks import MaskLoss, ImageLoss

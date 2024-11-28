@@ -18,7 +18,11 @@ import pytorch_ssim
 
 
 def get_device():
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    #return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    #return usage of CUDA_AVAILABLE_DEVICES=0
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+    return device
 
 
 def load_checkpoint(model, checkpoint_path):
@@ -710,6 +714,8 @@ class ResNetFeatureExtractor(nn.Module):
             image = torch.argmax(image, dim=1).unsqueeze(1)
             # scale by 255
             image = image/(self.n_classes-1) * 255
+            # scale to 0-1  
+            image = image/255
             
         return torch.nn.functional.normalize(self.model(image), p=2, dim=1) if self.normalize else self.model(image)
 
