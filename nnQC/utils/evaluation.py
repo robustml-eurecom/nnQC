@@ -24,16 +24,20 @@ from IPython.display import display
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def erode_ohe_mask(mask, target_pixels=8):
+def erode_ohe_mask(mask, target_pixels=8, iterations=20):
     mask_np = mask.cpu().numpy()
     eroded_mask_np = np.zeros_like(mask_np)
-
+    iters = 0
+    
     for i in range(mask_np.shape[0]):
         class_mask = mask_np[i, :, :]
-
-        while class_mask.sum() > target_pixels:
-            class_mask = binary_erosion(class_mask)
-
+        if target_pixels is not None:
+            while class_mask.sum() > target_pixels:
+                class_mask = binary_erosion(class_mask)
+        else:
+            while iters < iterations:
+                class_mask = binary_erosion(class_mask)
+                iters += 1
         eroded_mask_np[i, :, :] = class_mask
         
     eroded_mask = torch.from_numpy(eroded_mask_np).to(mask.device)
@@ -76,6 +80,7 @@ def evaluate_metrics(keys, prediction, reference, forceToOne=False):
         ref = ref if c==0 else np.where(ref!=c, 0, ref)
         pred = pred if c==0 else np.where(np.rint(pred)!=c, 0, pred)
 
+        '''
         try:
             results["DSC_" + key] = binary.dc(np.where(ref!=0, 1, 0), np.where(np.rint(pred)!=0, 1, 0))
         except:
@@ -84,6 +89,9 @@ def evaluate_metrics(keys, prediction, reference, forceToOne=False):
             results["HD_" + key] = binary.hd(np.where(ref!=0, 1, 0), np.where(np.rint(pred)!=0, 1, 0))
         except:
             results["HD_" + key] = np.nan
+        '''
+        results["DSC_" + key] = binary.dc(np.where(ref!=0, 1, 0), np.where(np.rint(pred)!=0, 1, 0))
+        results["HD_" + key] = binary.hd(np.where(ref!=0, 1, 0), np.where(np.rint(pred)!=0, 1, 0))
     return results
 
 
@@ -168,41 +176,37 @@ class SubjectVolumeEvaluator:
         """
         Add data for a specific subject, accumulating 3D volumes
         """
-        self.subject_volumes[subject_id]['scans'].append(scan)
-        self.subject_volumes[subject_id]['segmentations'].append(segmentation)
-        self.subject_volumes[subject_id]['ldm_reconstructions'].append(ldm_reconstruction)
-        self.subject_volumes[subject_id]['baseline_reconstructions'].append(baseline_reconstruction)
-        self.subject_volumes[subject_id]['gt_masks'].append(gt_mask)
+        self.subject_volumes[subject_id]['scans'] = scan
+        self.subject_volumes[subject_id]['segmentations'] = segmentation
+        self.subject_volumes[subject_id]['ldm_reconstructions'] = ldm_reconstruction
+        self.subject_volumes[subject_id]['baseline_reconstructions'] = baseline_reconstruction
+        self.subject_volumes[subject_id]['gt_masks'] = gt_mask
 
     def compute_subject_metrics(self):
         """
         Compute metrics for each subject by aggregating their volumes
         """
         for subject_id, volumes in self.subject_volumes.items():
-            # Stack volumes along first dimension to create 3D volumes
-            subject_scans = np.stack(volumes['scans'])
-            subject_segmentations = np.stack(volumes['segmentations'])
-            subject_ldm_recons = np.stack(volumes['ldm_reconstructions'])
-            subject_baseline_recons = np.stack(volumes['baseline_reconstructions'])
-            subject_gt_masks = np.stack(volumes['gt_masks'])
 
             # Compute metrics for the subject
             self.subject_results['ldm'][subject_id] = evaluate_metrics(
                 self.keys[1:], 
-                subject_segmentations.argmax(1), 
-                subject_ldm_recons.argmax(1)
+                volumes['segmentations'].argmax(1), 
+                volumes['ldm_reconstructions'].argmax(1)
             )
             self.subject_results['gt'][subject_id] = evaluate_metrics(
                 self.keys[1:], 
-                subject_segmentations.argmax(1), 
-                subject_gt_masks.argmax(1)
+                volumes['segmentations'].argmax(1), 
+                volumes['gt_masks'].argmax(1)
             )
             self.subject_results['baseline'][subject_id] = evaluate_metrics(
                 self.keys[1:], 
-                subject_segmentations.argmax(1), 
-                subject_baseline_recons.argmax(1)
+                volumes['segmentations'].argmax(1), 
+                volumes['baseline_reconstructions'].argmax(1)
             )
-
+        print("Finished computing subject metrics")
+        print("Results:", self.subject_results)
+        print()
         return self.subject_results
 
 
@@ -241,9 +245,9 @@ def ldm_testing(
                 print("Already processed")
                 continue
             
-            gt_masks = batch_gt['seg'].to(device)
-            segmentations = batch_test['seg'].to(device)
-            scans = batch_test['img'].to(device)
+            gt_masks = batch_gt['seg'][0].to(device)
+            segmentations = batch_test['seg'][0].to(device)
+            scans = batch_test['img'][0].to(device)
             
             # Process patient data
             segmentations, reconstruction, bad_reconstruction, gt_masks, scans = process_patient(
@@ -288,20 +292,25 @@ def ldm_testing(
     return subject_results
 
 
-def erode_random_slices(segmentations, prob=0.8):
+def erode_random_slices(segmentations, prob):
     target_pixels = random.choice([8, 16, 32, 64])
-    if prob < 0.7:
+    iterations = random.randint(13, 20)
+    if prob < 0.6:
         num_slices = segmentations.shape[0]
-        num_random_slices = random.randint(1, num_slices)  # Number of slices to erode
-        random_slices = random.sample(range(num_slices), num_random_slices)  # Randomly select slices
-
+        num_random_slices = random.randint(5, num_slices)  # Number of slices to erode
+        random_slices = random.sample(range(num_slices), num_random_slices) # Randomly select slices
         for i in random_slices:
-            segmentations[i] = erode_ohe_mask(segmentations[i], target_pixels)    
+            if prob < 0.2:
+                segmentations[i] = erode_ohe_mask(segmentations[i], None, iterations)
+            elif prob < 0.5:
+                segmentations[i] = create_holes(segmentations[i], 15, 20, 15)
+            else:
+                segmentations[i] = erode_ohe_mask(segmentations[i], target_pixels)  
     return segmentations
 
 
 def process_patient(scans, segmentations, gt_masks, unet, ae, baseline_ae, feature_extractor, inferer, scheduler):
-    prob = np.random.rand()
+    prob = random.uniform(0, .7)
     scans, segmentations, gt_masks = scans.to(device), segmentations.to(device), gt_masks.to(device) 
     segmentations = erode_random_slices(segmentations, prob)
     print("Segmentations shape:", segmentations.shape)

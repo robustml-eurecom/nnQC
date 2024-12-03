@@ -28,6 +28,10 @@ def compute_spacing(spacing):
         return combined_spacing
     return spacing
 
+def compute_intensity_percentiles(image, percentiles):
+    percentiles = np.percentile(image, percentiles)
+    return percentiles
+
 def process_mask(mask):
     mask = mask.get_fdata()
     if len(mask.shape) == 4:
@@ -75,6 +79,11 @@ def generate_patient_info(folder, patient_ids, start_idx=0):
             missing += 1
             continue
         
+        intensity_values = (
+            np.percentile(image, .5),
+            np.percentile(image, 99.5)
+        )
+        
         patient_info[id+start_idx] = {'ID': id}
         patient_info[id+start_idx]['classes'] = np.unique(mask).shape[0]
         patient_info[id+start_idx]["shape"] = image.shape
@@ -82,7 +91,8 @@ def generate_patient_info(folder, patient_ids, start_idx=0):
         patient_info[id+start_idx]["spacing"] = spacing[:3]
         patient_info[id+start_idx]["header"] = header
         patient_info[id+start_idx]["affine"] = affine
-        patient_info[id+start_idx]["orientation"] = "".join(nib.aff2axcodes(affine))
+        #patient_info[id+start_idx]["orientation"] = "".join(nib.aff2axcodes(affine))
+        patient_info[id+start_idx]["intensity_values"] = intensity_values
         patient_info[id+start_idx]["non_zero_slices"] = non_zero_slices
     return patient_info
   
@@ -143,24 +153,25 @@ def preprocess_monai(
     patient_ids, 
     start_idx, 
     patient_info, 
+    modality_info,
     loader,
     folder, 
     folder_out,
     isTest=False
 ):
-    #progress_bar = tqdm(patient_ids, desc="Preprocessing")
     fingerprints = {}
     missing = 0
     folder_out = os.path.join(folder_out, 'training') if not isTest else os.path.join(folder_out, 'testing')
     for id, batch in zip(patient_ids, loader):
-        #progress_bar.set_postfix_str(f"Patient {id}. Missing: {missing}/{len(patient_ids)}")
+
         if id not in patient_info:
             missing += 1
             tqdm.write(f"Patient {id} is missing info")
             continue
+        
         fingerprints['id'] = patient_info[id+start_idx]
         fingerprints['id']['root_dir'] = folder
-
+        fingerprints['id']['modality'] = modality_info
         fingerprints['id']['output_dir'] = folder_out
         
         loader_transforms = get_transforms(
@@ -183,13 +194,22 @@ def preprocess_monai(
      
 
 def apply_preprocessing(
-    patient_ids, start_idx, patient_info, loader, folder, folder_out, isTest):
+    patient_ids, 
+    start_idx,
+    patient_info,
+    modality_info,
+    loader,
+    folder,
+    folder_out,
+    isTest
+    ):
     if not os.path.exists(folder_out):
         os.makedirs(folder_out)
     preprocess_monai(
         patient_ids,
         start_idx,
         patient_info,
+        modality_info,
         loader,
         folder,
         folder_out,

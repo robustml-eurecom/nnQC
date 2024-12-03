@@ -5,10 +5,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import random
-from torch.amp import autocast, GradScaler
+from torch.cuda.amp import autocast, GradScaler
 from medpy.metric import binary
 from scipy.ndimage import binary_erosion
-from .networks import MaskLoss, ImageLoss
+from .networks import MaskLoss, ImageLoss, ConvProjector
 from .gans import LatentPerceptualLoss
 import torch.nn.functional as F
 from monai.losses import GeneralizedDiceLoss, PerceptualLoss, PatchAdversarialLoss
@@ -654,9 +654,9 @@ class AutoencoderKLTrainer:
 class LDMTrainer:
     def __init__(self, unet, spatial_ae, feat_extractor, mask_ae, inferer, scheduler, train_loader, val_loader, device):
         self.unet = unet.to(device)
-        self.spatial_ae = spatial_ae
-        self.feat_extractor = feat_extractor
-        self.mask_ae = mask_ae
+        self.spatial_ae = spatial_ae.module
+        self.feat_extractor = feat_extractor.module
+        self.mask_ae = mask_ae.module
         self.inferer = inferer
         self.scheduler = scheduler
         self.train_loader = train_loader
@@ -667,20 +667,32 @@ class LDMTrainer:
         self.val_losses = []
         
 
-    def train(self, ckpt_folder, logs_folder, epochs=200, val_interval=5, lr_start=1e-4, lr_end=1e-6, gamma=None):
+    def train(
+        self, 
+        ckpt_folder, 
+        logs_folder, 
+        projector=None,
+        epochs=200, 
+        val_interval=5,
+        lr_start=1e-4,
+        lr_end=1e-6,
+        gamma=None
+        ):
         self.n_epochs = epochs
         self.val_interval = val_interval
         self.optimizer = torch.optim.Adam(self.unet.parameters(), lr=lr_start)
         self.lr_scheduler = ExponentialLR(self.optimizer, gamma=gamma)
+        self.projector = projector
         
         if not os.path.exists(ckpt_folder):
             os.makedirs(ckpt_folder)
 
+        self.unet.train()
+        self.spatial_ae.eval()
+        self.feat_extractor.eval()
+        self.mask_ae.eval()
+        
         for epoch in range(self.n_epochs):
-            self.unet.train()
-            self.spatial_ae.eval()
-            self.feat_extractor.eval()
-            self.mask_ae.eval()
             
             epoch_loss = self._train_epoch(epoch)
 
@@ -734,16 +746,20 @@ class LDMTrainer:
                 z_mu, z_sigma = self.spatial_ae.autoencoderkl.encode(segmentations)
                 z = self.spatial_ae.autoencoderkl.sampling(z_mu, z_sigma)
                 noise = torch.randn_like(z).to(self.device)
-                condition = self.feat_extractor.encode(images).to(self.device)
-                #condition = F.normalize(condition, p=2, dim=-1)
-                condition = condition.view(segmentations.shape[0], -1).unsqueeze(1)
+                opinion2 = self.feat_extractor.encode(images).to(self.device)
+                condition = opinion2.view(segmentations.shape[0], -1).unsqueeze(1)
                 
                 if self.mask_ae is not None:
                     holes_segmentations = torch.stack([create_holes(mask, 15, 30, 10) for mask in segmentations]) if prob < 0.5 else segmentations
-                    mask_condition = self.mask_ae.encode(holes_segmentations).to(self.device)
-                    #mask_condition = F.normalize(mask_condition, p=2, dim=-1)
-                    mask_condition = mask_condition.view(segmentations.shape[0], -1).unsqueeze(1)
-                    condition = torch.cat([condition, mask_condition], dim=-1)
+                    opinion1 = self.mask_ae.encode(holes_segmentations).to(self.device)
+                    condition = torch.cat([
+                        condition,
+                        opinion1.view(segmentations.shape[0], -1).unsqueeze(1)
+                        ],dim=-1)
+                    
+                if self.projector:
+                    cat_opinions = torch.cat([opinion1, opinion2], dim=1)
+                    condition = cat_opinions
                 
                 timesteps = torch.randint(0, self.inferer.scheduler.num_train_timesteps, (z.shape[0],), device=z.device).long()
                 noise_pred = self.inferer(
@@ -782,11 +798,20 @@ class LDMTrainer:
                     z_mu, z_sigma = self.spatial_ae.autoencoderkl.encode(segmentations)
                     z = self.spatial_ae.autoencoderkl.sampling(z_mu, z_sigma)
                     noise = torch.randn_like(z).to(self.device)
-                    condition = self.feat_extractor.encode(images).to(self.device).view(segmentations.shape[0], -1).unsqueeze(1)
+                    opinion2 = self.feat_extractor.encode(images).to(self.device)
+                    condition = opinion2.view(segmentations.shape[0], -1).unsqueeze(1)
+                    
                     if self.mask_ae is not None:
                         holes_segmentations = torch.stack([create_holes(mask, 15, 30, 10) for mask in segmentations]) if prob < 0.5 else segmentations
-                        mask_condition = self.mask_ae.encode(holes_segmentations).to(self.device).view(segmentations.shape[0], -1).unsqueeze(1)
-                        condition = torch.cat([condition, mask_condition], dim=-1)
+                        opinion1 = self.mask_ae.encode(holes_segmentations).to(self.device)
+                        condition = torch.cat([
+                            condition,
+                            opinion1.view(segmentations.shape[0], -1).unsqueeze(1)
+                            ],dim=-1)
+                    
+                    if self.projector:
+                        cat_opinions = torch.cat([opinion1, opinion2], dim=1)
+                        condition = cat_opinions
                     
                     timesteps = torch.randint(0, self.inferer.scheduler.num_train_timesteps, (z.shape[0],), device=z.device).long()
                     noise_pred = self.inferer(
@@ -807,17 +832,29 @@ class LDMTrainer:
         return val_loss
 
     def _sample_image(self, epoch, logs_folder):
-        segmentations = next(iter(self.val_loader))["seg"].to(self.device)
-        images = next(iter(self.val_loader))["img"].to(self.device)
+        # select random batch
+        batch = next(iter(self.val_loader))
+        images = batch["img"].to(self.device)
+        segmentations = batch["seg"].to(self.device)
 
-        z = torch.rand_like(
-            self.spatial_ae.encode_stage_2_inputs(segmentations[0].unsqueeze(0))
-            ).to(self.device)
-        condition = self.feat_extractor.encode(images[0].unsqueeze(0)).to(self.device).view(1, -1).unsqueeze(1)
+        z = torch.rand_like(self.spatial_ae.encode_stage_2_inputs(
+            segmentations[0].unsqueeze(0))).to(self.device)
+        
+        opinion2 = self.feat_extractor.encode(images[0].unsqueeze(0)).to(self.device)
+        condition = opinion2.view(1, -1).unsqueeze(1)
+        
         if self.mask_ae is not None:
             holes_segmentations = create_holes(segmentations[0], 15, 30, 10)
-            mask_condition = self.mask_ae.encode(holes_segmentations.unsqueeze(0)).to(self.device).view(1, -1).unsqueeze(1)
-            condition = torch.cat([condition, mask_condition], dim=-1)
+            opinion1 = self.mask_ae.encode(holes_segmentations.unsqueeze(0)).to(self.device)
+            condition = torch.cat([
+                condition,
+                opinion1.view(1, -1).unsqueeze(1)
+                ],dim=-1)
+            
+        if self.projector:
+            cat_opinions = torch.cat([opinion1, opinion2], dim=1)
+            condition = cat_opinions
+            
         self.scheduler.set_timesteps(num_inference_steps=1000)
 
         with autocast(enabled=True):

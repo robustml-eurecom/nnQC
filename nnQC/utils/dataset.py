@@ -11,6 +11,7 @@ from monai.transforms import (
     LoadImaged,
     Resized,
     ScaleIntensityd,
+    ScaleIntensityRanged,
     NormalizeIntensityd,
     SqueezeDimd,
     SpatialPadd,
@@ -83,7 +84,7 @@ def get_dataloader(
         batch_size=batch_size,
         num_workers=2,
         pin_memory=torch.cuda.is_available(),
-        shuffle=False
+        shuffle=True
     )
 
 def get_test_dataloader(
@@ -108,13 +109,13 @@ def get_test_dataloader(
     print("Un-processed shape: ", random_sample.shape)
     print()
     
-    transforms = get_transforms("val", classes=classes)
+    transforms = get_transforms("test", classes=classes)
     volume_ds = monai.data.CacheDataset(data=data, transform=transforms)
     
     if sanity_check:
         check_data(volume_ds)
 
-    patch_func = monai.data.PatchIterd(
+    '''patch_func = monai.data.PatchIterd(
         keys=["img", "seg"],
         patch_size=(None, None, 1),  # dynamic first two dimensions
         start_pos=(0, 0, 0)
@@ -127,12 +128,12 @@ def get_test_dataloader(
     )
     
     if sanity_check:
-        check_data(patch_ds)
+        check_data(patch_ds)'''
         
     return DataLoader(
-        patch_ds,
-        batch_size=10,
-        num_workers=2,
+        volume_ds,
+        batch_size=1,
+        num_workers=4,
         pin_memory=torch.cuda.is_available(),
         shuffle=False
     )
@@ -346,20 +347,39 @@ class LDMDataset(Dataset):
 
 
 def get_transforms(mode, classes=None, fingerprints=None):
-    if mode == "loader":
+    if mode == "loader":  
+ 
+        if fingerprints['modality'] == 'ct':
+            scaler = ScaleIntensityRanged(
+                        keys=["img"],
+                        a_min=-57,
+                        a_max=164,
+                        b_min=0.0,
+                        b_max=1.0,
+                        clip=True,
+                    )
+        elif fingerprints['modality'] == 'mri':
+            scaler = ScaleIntensityRanged(
+                        keys=["img"],
+                        a_min=fingerprints['intensity_values'][0],
+                        a_max=fingerprints['intensity_values'][1],
+                        b_min=0.0,
+                        b_max=1.0,
+                        clip=True,
+                    )             
         return Compose(
             [
                 LoadImaged(keys=["img", "seg"]),
                 EnsureChannelFirstd(keys=["img", "seg"]),
                 EnsureTyped(keys=["img", "seg"]),
+                scaler,
+                CropForegroundd(keys=["img", "seg"], source_key='seg'),
+                Orientationd(keys=["img", "seg"], axcodes='RAS'),     
                 Spacingd(
                     keys=["img", "seg"], 
                     pixdim=fingerprints['spacing'], 
                     mode=("bilinear", "nearest")
-                    ),
-                Orientationd(keys=["img", "seg"], axcodes='RAS'),
-                CropForegroundd(keys=["img", "seg"], source_key="seg"),
-                ScaleIntensityd(keys="img"),
+                ),       
                 Rotate90d(keys=["img", "seg"], spatial_axes=(0, 1)),
             ]
         )
@@ -384,6 +404,19 @@ def get_transforms(mode, classes=None, fingerprints=None):
                 LoadImaged(keys=["img", "seg"]),
                 EnsureChannelFirstd(keys=["img", "seg"]),
                 EnsureTyped(keys=["img", "seg"]),
+            ]
+        )
+    
+    elif mode == "test":
+        return Compose(
+            [
+                LoadImaged(keys=["img", "seg"]),
+                EnsureChannelFirstd(keys=["img", "seg"]),
+                EnsureTyped(keys=["img", "seg"]),
+                Resized(keys=["img", "seg"], spatial_size=[128, 128, -1]),
+                SpatialPadd(keys=["img", "seg"], spatial_size=[256, 256, -1]),
+                AsDiscreted(keys=["seg"], to_onehot=classes, dim=0),
+                Lambdad(keys=["img", "seg"], func=lambda x: x.permute(3, 0, 1, 2)),
             ]
         )
     

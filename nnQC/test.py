@@ -36,12 +36,12 @@ warnings.filterwarnings("ignore")
 
 def load_checkpoint(model, checkpoint_path):
     ckpt = [f for f in os.listdir(checkpoint_path) if re.search(r'best', f)]
-    if isinstance(model, SpatialAE):
-        model.load_state_dict(torch.load(os.path.join(checkpoint_path, ckpt[0]))['autoencoderkl_state_dict'])
-    elif isinstance(model, DiffusionModelUNet):
-        model.load_state_dict(torch.load(os.path.join(checkpoint_path, ckpt[0]))['unet_state_dict'])
+    if isinstance(model.module, SpatialAE):
+        model.load_state_dict(torch.load(os.path.join(checkpoint_path, ckpt[0]))['autoencoderkl_state_dict'], strict=False)
+    elif isinstance(model.module, DiffusionModelUNet):
+        model.load_state_dict(torch.load(os.path.join(checkpoint_path, ckpt[0]))['unet_state_dict'], strict=False)
     else:
-        model.load_state_dict(torch.load(os.path.join(checkpoint_path, ckpt[0]))['model'])
+        model.load_state_dict(torch.load(os.path.join(checkpoint_path, ckpt[0]))['model'], strict=False)
     print(f'Loaded checkpoint from {os.path.join(checkpoint_path, ckpt[0])}')
     return model
 
@@ -58,19 +58,19 @@ def run(args):
     mask_model_opts = config["ae"]['mask-ae']
     
     feature_extractor = load_checkpoint(
-        LargeImageAutoEncoder(**img_model_opts), 
+        torch.nn.DataParallel(LargeImageAutoEncoder(**img_model_opts)), 
         os.path.join(
             args.experiment_name,
             img_model_opts['ckpt_path'])
         )
     spatial_ae = load_checkpoint(
-        SpatialAE(**spatial_model_opts['generator']),
+        torch.nn.DataParallel(SpatialAE(**spatial_model_opts['generator'])),
         os.path.join(
             args.experiment_name,
             spatial_model_opts['ckpt_path'])
         )
     unet = load_checkpoint(
-        DiffusionModelUNet(**config["ldm"]['unet']),
+        torch.nn.DataParallel(DiffusionModelUNet(**config["ldm"]['unet'])),
         ldm_ckpts
     )
     
@@ -78,18 +78,18 @@ def run(args):
     
     if args.dual:
         mask_ae = load_checkpoint(
-            ConvAE(**mask_model_opts),
+            torch.nn.DataParallel(ConvAE(**mask_model_opts)),
             os.path.join(
                 args.experiment_name,
                 mask_model_opts['ckpt_path'])
             )
-        mask_ae = mask_ae.to(device)
+        mask_ae = mask_ae.module.to(device[0])
     else:
         mask_ae = None
     
-    feature_extractor = feature_extractor.to(device)
-    spatial_ae = spatial_ae.to(device)
-    unet = unet.to(device)
+    feature_extractor = feature_extractor.module.to(device[0])
+    spatial_ae = spatial_ae.module.to(device[0])
+    unet = unet.module.to(device[0])
    
     ldm_opts = config["ldm"]
     scheduler = DDPMScheduler(**ldm_opts['ddpm'])
@@ -111,7 +111,7 @@ def run(args):
         with autocast(device_type="cuda", enabled=True):
             check_data = monai.utils.misc.first(test_loader) 
             z = spatial_ae.autoencoderkl.encode_stage_2_inputs(
-                check_data["seg"].to(device)
+                check_data["seg"][0].to(device[0])
             )
 
     print(f"Scaling factor set to {1/torch.std(z)}")

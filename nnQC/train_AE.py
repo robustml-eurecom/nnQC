@@ -71,8 +71,13 @@ def run(args):
     
     device = get_device()
     model = get_model(args.model, model_opts)
-    model = model.to(device) if 'spatial' not in args.model else {k: v.to(device) for k, v in model.items()}
-
+    if torch.cuda.device_count() > 1 and len(device[1]) > 1:
+        model = {k: torch.nn.DataParallel(v, device_ids=device[1]) for k, v in model.items()}
+    if 'spatial' not in args.model:
+        model = {k: v.to(device[0]) for k, v in model.items()}
+    else:
+        model = model.to(device[0])
+        
     if 'spatial' not in args.model:
         trainer_opts = config["ae_trainer"]['standard'] 
         optimizer = torch.optim.Adam(model.parameters(), lr=model_opts['lr'])
@@ -81,7 +86,7 @@ def run(args):
     
     if os.listdir(os.path.join(outputs, args.ckpt_folder)):
         best_ckpt = [f for f in os.listdir(os.path.join(outputs, args.ckpt_folder)) if re.search(r'best', f)][0]
-        ckpt = torch.load(os.path.join(outputs, args.ckpt_folder, best_ckpt))
+        ckpt = torch.load(os.path.join(outputs, args.ckpt_folder, best_ckpt), weights_only=True)
         model.load_state_dict(ckpt['model'])
         optimizer.load_state_dict(ckpt['optimizer'])
     
@@ -90,7 +95,7 @@ def run(args):
         trainer = AutoencoderKLTrainer(
             model['gen'],
             model['dis'],
-            device
+            device[0]
         )
     else:
         trainer = AETrainer(
@@ -98,7 +103,7 @@ def run(args):
             optimizer, 
             get_loss_fn(args.model, loss_fn, model_opts),
             keys,
-            device,
+            device[0],
             mode=args.model
         )
     

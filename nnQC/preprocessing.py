@@ -44,13 +44,12 @@ def run(args):
         patient_info = {**patient_info, **generate_patient_info(args.raw_folder, patient_ids, args.start_idx)}
         np.save(os.path.join(args.folder_out, "patient_info.npy"), patient_info)
  
-
-    images = sorted(glob(os.path.join(args.raw_folder, "**", "*image.nii.gz")))
+    images = sorted(glob(os.path.join(args.raw_folder, "**", "*image*")))
     segs = sorted(glob(os.path.join(args.raw_folder, "**", "*mask.nii.gz")))
 
     data = [{"img": img, "seg": seg, "id": i} for i, (img, seg) in enumerate(zip(images, segs))]
     print(data[0])
-
+    
     print()
     print("Dataset loading")
 
@@ -63,6 +62,7 @@ def run(args):
         patient_ids,
         args.start_idx,
         patient_info,
+        args.modality,
         loader,
         args.raw_folder,
         args.folder_out,
@@ -78,6 +78,7 @@ if __name__ == "__main__":
     parser.add_argument('--raw_folder', default='data/training', type=str, help='Folder containing mask images')
     parser.add_argument('--folder_out', default='preprocessed', type=str, help='Folder to save fingerprints')
     parser.add_argument('--test', '-t', action='store_true', help='Use test data')
+    parser.add_argument('--modality', '-m', default='mri', type=str, help='Modality to preprocess')
     parser.add_argument('--start_idx', '-s', default=0, type=int, help='Start index')
     args = parser.parse_args()
     

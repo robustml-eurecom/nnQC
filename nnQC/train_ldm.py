@@ -11,7 +11,7 @@ import argparse
 import re
 import shutil
 
-from torch.cuda.amp import autocast
+from torch.amp import autocast
 from torchvision.models import (
     resnet18,
     resnet50
@@ -32,7 +32,9 @@ from models.trainers import LDMTrainer
 from models.diffusion_model_unet import DiffusionModelUNet
 from generative.networks.schedulers import DDPMScheduler
 from generative.inferers import LatentDiffusionInferer
+import warnings
 
+warnings.filterwarnings("ignore")
 monai.utils.set_determinism(0)     
 
 def run(args):
@@ -52,40 +54,45 @@ def run(args):
     spatial_model_opts = config["ae"]['spatial-ae']
     dataset_opts = config["dataset"]
     
+    device = get_device()
+    
     spatial_ae = load_checkpoint(
-        SpatialAE(**spatial_model_opts['generator']),
+        torch.nn.DataParallel(SpatialAE(**spatial_model_opts['generator']), device_ids=device[1]),
         os.path.join(
             args.experiment_name,
             spatial_model_opts['ckpt_path'])
         )
     
-    device = get_device()
-    
-    if not args.pretrained:
+    projector = False
+    if args.train_mode == 'std' or args.train_mode == 'conv':
         feature_extractor = load_checkpoint(
-            LargeImageAutoEncoder(**img_model_opts), 
+            torch.nn.DataParallel(LargeImageAutoEncoder(**img_model_opts), device_ids=device[1]), 
             os.path.join(
                 args.experiment_name,
                 img_model_opts['ckpt_path'])
             )
         mask_ae = load_checkpoint(
-            ConvAE(**mask_model_opts),
+            torch.nn.DataParallel(ConvAE(**mask_model_opts), device_ids=device[1]),
             os.path.join(
                 args.experiment_name,
                 mask_model_opts['ckpt_path'])
-            )
-    else:
+        )
+        if args.train_mode == 'conv':
+            projector = True
+            
+    elif args.train_mode == 'pretrained':
         feature_extractor = CLIPFeatureExtractor(None, dataset_opts['classes'])
-        mask_ae = ResNetFeatureExtractor('resnet18', dataset_opts['classes'])
-        
+        mask_ae = ResNetFeatureExtractor('resnet18', dataset_opts['classes'])  
     
-    feature_extractor = feature_extractor.to(device)
-    mask_ae = mask_ae.to(device)
-    spatial_ae = spatial_ae.to(device)
-   
     ldm_opts = config["ldm"]
-    unet = DiffusionModelUNet(**ldm_opts['unet']).to(device)
-    scheduler = DDPMScheduler(**ldm_opts['ddpm'])
+    unet = DiffusionModelUNet(**ldm_opts['unet'])
+    unet = torch.nn.DataParallel(unet, device_ids=device[1])
+    scheduler = DDPMScheduler(**ldm_opts['ddpm'])     
+    
+    feature_extractor = feature_extractor.to(device[0])
+    mask_ae = mask_ae.to(device[0])
+    spatial_ae = spatial_ae.to(device[0])
+    unet = unet.to(device[0])
     
     train_loader = get_dataloader(
         args.data_dir, 
@@ -103,10 +110,10 @@ def run(args):
     )
     
     with torch.no_grad():
-        with autocast(enabled=True):
+        with autocast(device_type='cuda', enabled=True):
             check_data = monai.utils.misc.first(val_loader) 
-            z = spatial_ae.autoencoderkl.encode_stage_2_inputs(
-                check_data["seg"].to(device)
+            z = spatial_ae.module.autoencoderkl.encode_stage_2_inputs(
+                check_data["seg"].to(device[0])
             )
 
     print(f"Scaling factor set to {1/torch.std(z)}")
@@ -137,12 +144,13 @@ def run(args):
         scheduler=scheduler,
         train_loader=train_loader,
         val_loader=val_loader,
-        device=device
+        device=device[0]
     )
             
     trainer.train(
         os.path.join(outputs, args.ckpt_folder),
         os.path.join(outputs, args.log_folder),
+        projector,
         **ldm_trainer_opts
     )
     
@@ -152,7 +160,7 @@ if __name__ == "__main__":
     parser.add_argument('--config', '-c', default='config.yml', type=str, help='Path to config file')
     parser.add_argument('--data_dir', '-d', default='preprocessed', type=str, help='Path to data directory')
     parser.add_argument('--ckpt_folder', '-ckpt', default='checkpoints', type=str, help='Folder to save checkpoints')
-    parser.add_argument('--pretrained', action='store_true', help='Use CLIP/ResNet18 feature extractor')
+    parser.add_argument('--train_mode', '-t', default='std', type=str, help='Training mode')
     parser.add_argument('--experiment_name', '-e', default=None, type=str, help='Name of experiment')
     parser.add_argument('--log_folder', '-l', default='logs', type=str, help='Folder to save logs')
     args = parser.parse_args()
