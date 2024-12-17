@@ -115,7 +115,11 @@ def run(args):
             z = spatial_ae.module.autoencoderkl.encode_stage_2_inputs(
                 check_data["seg"].to(device[0])
             )
-
+            recon, _, _ = spatial_ae(check_data["seg"].to(device[0]))
+            
+    plt.imshow(recon[0].argmax(0).cpu().numpy())
+    plt.savefig('recon.png')
+            
     print(f"Scaling factor set to {1/torch.std(z)}")
     print("Finished setup")
     print("Starting training------------------------------------------")

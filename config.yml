@@ -10,10 +10,10 @@ ae:
   mask-ae:
     name: 'mask-ae'
     train_folder: 'data'
-    n_channels: 2
+    n_channels: 4
     z_dim: 100
     loss_functions: ['BKGDLoss', 'MSELoss']
-    keys: ['BK_', 'Skull_']
+    keys: ['BK_', 'LV_', 'MYO_', 'RV_']
     ckpt_path: 'mask-ae_outputs/checkpoints'
     loss_args:
       settling_epochs_BKGDLoss: 10
@@ -21,12 +21,12 @@ ae:
     lr: 0.0002
   spatial-ae:
     generator:
-      in_channels: 2
-      out_channels: 2
+      in_channels: 4
+      out_channels: 4
       latent_channels: 3
     discriminator:
       spatial_dims: 2
-      in_channels: 2
+      in_channels: 4
       num_layers_d: 3
       num_channels: 64
       out_channels: 1
@@ -52,7 +52,7 @@ ldm:
 
 dataset:
   batch_size: 5
-  classes: 2
+  classes: 4
   id_start: 288
   id_end: 320
 

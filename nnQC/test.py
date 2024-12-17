@@ -37,7 +37,7 @@ warnings.filterwarnings("ignore")
 def load_checkpoint(model, checkpoint_path):
     ckpt = [f for f in os.listdir(checkpoint_path) if re.search(r'best', f)]
     if isinstance(model.module, SpatialAE):
-        model.load_state_dict(torch.load(os.path.join(checkpoint_path, ckpt[0]))['autoencoderkl_state_dict'], strict=False)
+        model.load_state_dict(torch.load(os.path.join(checkpoint_path, ckpt[0]))['autoencoderkl_state_dict'])
     elif isinstance(model.module, DiffusionModelUNet):
         model.load_state_dict(torch.load(os.path.join(checkpoint_path, ckpt[0]))['unet_state_dict'], strict=False)
     else:
@@ -58,19 +58,19 @@ def run(args):
     mask_model_opts = config["ae"]['mask-ae']
     
     feature_extractor = load_checkpoint(
-        torch.nn.DataParallel(LargeImageAutoEncoder(**img_model_opts)), 
+        LargeImageAutoEncoder(**img_model_opts), 
         os.path.join(
             args.experiment_name,
             img_model_opts['ckpt_path'])
         )
     spatial_ae = load_checkpoint(
-        torch.nn.DataParallel(SpatialAE(**spatial_model_opts['generator'])),
+        SpatialAE(**spatial_model_opts['generator']),
         os.path.join(
             args.experiment_name,
             spatial_model_opts['ckpt_path'])
         )
     unet = load_checkpoint(
-        torch.nn.DataParallel(DiffusionModelUNet(**config["ldm"]['unet'])),
+        DiffusionModelUNet(**config["ldm"]['unet']),
         ldm_ckpts
     )
     
@@ -78,18 +78,18 @@ def run(args):
     
     if args.dual:
         mask_ae = load_checkpoint(
-            torch.nn.DataParallel(ConvAE(**mask_model_opts)),
+            ConvAE(**mask_model_opts),
             os.path.join(
                 args.experiment_name,
                 mask_model_opts['ckpt_path'])
             )
-        mask_ae = mask_ae.module.to(device[0])
+        mask_ae = mask_ae.to(device[0])
     else:
         mask_ae = None
     
-    feature_extractor = feature_extractor.module.to(device[0])
-    spatial_ae = spatial_ae.module.to(device[0])
-    unet = unet.module.to(device[0])
+    feature_extractor = feature_extractor.to(device[0])
+    spatial_ae = spatial_ae.to(device[0])
+    unet = unet.to(device[0])
    
     ldm_opts = config["ldm"]
     scheduler = DDPMScheduler(**ldm_opts['ddpm'])
@@ -105,7 +105,12 @@ def run(args):
         True
     )
     
-    gt_loader = test_loader
+    gt_loader = get_test_dataloader(    
+        args.data_dir+'_GT',
+        [dataset_opts['id_start'], dataset_opts['id_end']],
+        dataset_opts['classes'], 
+        True
+    )
     
     with torch.no_grad():
         with autocast(device_type="cuda", enabled=True):
@@ -135,8 +140,8 @@ def run(args):
         inferer, 
         scheduler, 
         [gt_loader, test_loader],
-        dataset_opts['id_start'],
-        dataset_opts['id_end'],
+        args.start_idx,
+        None,
         keys,
         args.results_folder
     )

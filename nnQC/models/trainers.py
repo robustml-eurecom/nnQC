@@ -5,7 +5,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import random
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast
+from torch.cuda.amp import GradScaler
 from medpy.metric import binary
 from scipy.ndimage import binary_erosion
 from .networks import MaskLoss, ImageLoss, ConvProjector
@@ -17,10 +18,9 @@ from torch.optim.lr_scheduler import ExponentialLR
 
 def find_empty_masks(images):
     for i in range(images.size(0)):
-        if images[i].sum() == 0:
-            return True
+        return (images[i].sum() == 0 or images[i].sum() / images[i].numel() < 0.001)
     
-
+    
 def erode_ohe_mask(mask, target_pixels=8):
     mask_np = mask.cpu().numpy()
     eroded_mask_np = np.zeros_like(mask_np)
@@ -210,211 +210,6 @@ class AETrainer:
             ax[1].set_title(f"Reconstructed {self.mode}")
             plt.show()
             plt.savefig(f'{logs_folder}/reconstruction_epoch_{epoch}.png')
-            plt.close()
-
-
-class GANTrainer:
-    def __init__(
-        self, 
-        generator, 
-        discriminator, 
-        g_optimizer, 
-        d_optimizer, 
-        device, 
-        feature_extractor, 
-        ae, 
-        loss_functions,
-        lambda_gan=0.5
-    ):
-        self.generator = generator
-        self.discriminator = discriminator
-        self.g_optimizer = g_optimizer
-        self.d_optimizer = d_optimizer
-        self.device = device
-        self.img_ae = feature_extractor
-        self.mask_ae = ae
-        self.lambda_gan = lambda_gan
-        self.loss_functions = loss_functions
-        self.metrics = Metrics()
-        #self.scaler = GradScaler()
-
-    def train(
-        self, 
-        train_loader, 
-        val_loader, 
-        num_epochs, 
-        val_interval,
-        ckpt_folder,
-        logs_folder,
-    ):
-        
-        if not os.path.exists(ckpt_folder):
-            os.makedirs(ckpt_folder)
-
-        best_val_loss = float('inf')
-
-        for epoch in range(num_epochs):
-            self.generator.train()
-            self.discriminator.train()
-            train_g_loss, train_d_loss = self._train_epoch(train_loader, epoch)
-
-            print(f'Epoch [{epoch+1}/{num_epochs}], Train D Loss: {train_d_loss:.4f}, Train G Loss: {train_g_loss:.4f}')
-
-            self.generator.eval()
-            self.discriminator.eval()
-            val_g_loss, val_d_loss = self._validate_epoch(val_loader, epoch)
-
-            print(f'Epoch [{epoch+1}/{num_epochs}], Validation D Loss: {val_d_loss:.4f}, Validation G Loss: {val_g_loss:.4f}')
-
-            if val_g_loss < best_val_loss:
-                best_val_loss = val_g_loss
-                print(f'Saving best model at epoch {epoch+1}')
-                torch.save({
-                    'G': self.generator.state_dict(),
-                    'D': self.discriminator.state_dict(),
-                    'G_optim': self.g_optimizer.state_dict(),
-                    'D_optim': self.d_optimizer.state_dict()
-                }, f'{ckpt_folder}/best_model.pth')
-
-            if (epoch + 1) % val_interval == 0:
-                self._visualize_results(val_loader, logs_folder, epoch)
-
-            print('--------------------------------------------------')
-
-    def _train_epoch(self, train_loader, epoch):
-        total_g_loss = 0
-        total_d_loss = 0
-        num_slices = 0
-        progress_bar = tqdm(enumerate(train_loader), ncols=70)
-        progress_bar.set_description(f"Epoch {epoch+1}")
-        
-        for step, batch in progress_bar:
-            prob = np.random.rand()
-            target_pix_choice = np.random.choice([8, 16, 32])
-            scans, gt_masks = batch['img'], batch['seg']
-            scans, gt_masks = scans.to(self.device), gt_masks.to(self.device)
-            corrupted_masks = torch.stack([erode_ohe_mask(mask, target_pix_choice) for mask in gt_masks]) if prob < 0.5 else gt_masks
-
-            batch_size = scans.size(0)
-            num_slices += batch_size
-            real_labels = torch.ones(batch_size, 1).to(self.device)
-            fake_labels = torch.zeros(batch_size, 1).to(self.device)
-
-            # ---- Train Discriminator ----
-            self.discriminator.zero_grad()
-            
-            real_outputs = self.discriminator(gt_masks)
-            d_loss_real = bce_loss(real_outputs, real_labels)
-            
-            features = self.img_ae.encode(scans).to(self.device)
-            embeddings = self.mask_ae.encode(corrupted_masks).to(self.device)
-
-            generated_masks = self.generator(features, embeddings)
-            fake_outputs = self.discriminator(generated_masks.detach())
-            d_loss_fake = bce_loss(fake_outputs, fake_labels)
-
-            d_loss = d_loss_real + d_loss_fake
-            d_loss.backward()
-            self.d_optimizer.step()
-
-            # ---- Train Generator ----
-            self.generator.zero_grad()
-
-            # GAN loss
-            fake_outputs = self.discriminator(generated_masks)
-            g_loss_gan = self.lambda_gan * bce_loss(fake_outputs, real_labels) \
-                + (1 - self.lambda_gan) * recon_loss(generated_masks, gt_masks, epoch, **self.loss_functions)
-
-            # Latent perceptual loss
-            gt_latent = self.mask_ae.encode(gt_masks)
-            latent_perceptual_loss = LatentPerceptualLoss()(gt_latent, self.mask_ae.encode(generated_masks))
-
-            ## Cycle consistency loss
-            #cycle_loss_value = cycle_consistency_loss(self.mask_ae, gt_latent, generated_masks)
-
-            # Total generator loss
-            g_loss = g_loss_gan + 2 * latent_perceptual_loss #+ cycle_loss_value
-            g_loss.backward()
-            self.g_optimizer.step()
-
-            total_g_loss += g_loss.item()
-            total_d_loss += d_loss.item()
-
-            progress_bar.set_postfix({"G loss": total_g_loss / (step + 1), "D loss": total_d_loss / (step + 1)})
-            
-        return total_g_loss / (step+1), total_d_loss / (step+1)
-
-    def _validate_epoch(self, val_loader, epoch):
-        total_g_loss = 0
-        total_d_loss = 0
-        num_slices = 0
-
-        with torch.no_grad():
-            for i, batch in enumerate(val_loader):
-                prob = np.random.rand()
-                target_pix_choice = np.random.choice([8, 16, 32])
-                scans, gt_masks = batch['img'], batch['seg']
-                scans, gt_masks = scans.to(self.device), gt_masks.to(self.device)
-                corrupted_masks = torch.stack([erode_ohe_mask(mask, target_pix_choice) for mask in gt_masks]) if prob < 0.5 else gt_masks
-
-                batch_size = scans.size(0)
-                num_slices += batch_size
-
-                real_labels = torch.ones(batch_size, 1).to(self.device)
-                fake_labels = torch.zeros(batch_size, 1).to(self.device)
-
-                # ---- Discriminator ----
-                real_outputs = self.discriminator(gt_masks)
-                d_loss_real = bce_loss(real_outputs, real_labels)
-
-                features = self.img_ae.encode(scans).to(self.device)
-                embeddings = self.mask_ae.encode(corrupted_masks).to(self.device)
-
-                generated_masks = self.generator(features, embeddings)
-                fake_outputs = self.discriminator(generated_masks.detach())
-                d_loss_fake = bce_loss(fake_outputs, fake_labels)
-
-                d_loss = d_loss_real + d_loss_fake
-
-                # ---- Generator ----
-                fake_outputs = self.discriminator(generated_masks)
-                g_loss_gan = self.lambda_gan * bce_loss(fake_outputs, real_labels) \
-                    + (1 - self.lambda_gan) * recon_loss(generated_masks, gt_masks, epoch, **self.loss_functions)
-
-                gt_latent = self.mask_ae.encode(gt_masks)
-                latent_perceptual_loss = LatentPerceptualLoss()(gt_latent, self.mask_ae.encode(generated_masks))
-
-                g_loss = g_loss_gan + 2 * latent_perceptual_loss #+ cycle_loss_value
-
-                total_d_loss += d_loss.item()
-                total_g_loss += g_loss.item()
-
-        return total_g_loss / (i+1), total_d_loss / (i+1)
-
-    def _visualize_results(self, val_loader, logs_folder, epoch):
-        self.generator.eval()
-        with torch.no_grad():
-            target_pix_choice = np.random.choice([8, 16, 32])
-            batch = next(iter(val_loader))
-            scans, gt_masks = batch['img'], batch['seg']
-            scans, gt_masks = scans.to(self.device), gt_masks.to(self.device)
-            corrupted_masks = torch.stack([erode_ohe_mask(mask, target_pix_choice) for mask in gt_masks])
-
-            features = self.img_ae.encode(scans).to(self.device)
-            embeddings = self.mask_ae.encode(corrupted_masks).to(self.device)
-            generated_masks = self.generator(features, embeddings)
-
-            fig, ax = plt.subplots(1, 4, figsize=(10, 5))
-            ax[0].imshow(gt_masks[0].cpu().numpy().argmax(0), cmap="gray")
-            ax[0].set_title("Ground truth")
-            ax[1].imshow(scans[0, 0].cpu().numpy(), cmap="gray")
-            ax[1].set_title("Input image")
-            ax[2].imshow(corrupted_masks[0].cpu().numpy().argmax(0), cmap="gray")
-            ax[2].set_title("Input corr. mask")
-            ax[3].imshow(generated_masks[0].cpu().numpy().argmax(0), cmap="gray")
-            ax[3].set_title("Generated")
-            
-            plt.savefig(f'{logs_folder}/generated_masks_epoch_{epoch}.png')
             plt.close()
 
 
@@ -742,7 +537,7 @@ class LDMTrainer:
             if find_empty_masks(segmentations):
                 continue
             
-            with autocast(enabled=True):
+            with autocast(device_type='cuda', enabled=True):
                 z_mu, z_sigma = self.spatial_ae.autoencoderkl.encode(segmentations)
                 z = self.spatial_ae.autoencoderkl.sampling(z_mu, z_sigma)
                 noise = torch.randn_like(z).to(self.device)
@@ -794,7 +589,10 @@ class LDMTrainer:
                 segmentations = batch["seg"].to(self.device)
                 prob = np.random.rand()
                 
-                with autocast(enabled=True):
+                if find_empty_masks(segmentations):
+                    continue
+                
+                with autocast(device_type='cuda', enabled=True):
                     z_mu, z_sigma = self.spatial_ae.autoencoderkl.encode(segmentations)
                     z = self.spatial_ae.autoencoderkl.sampling(z_mu, z_sigma)
                     noise = torch.randn_like(z).to(self.device)
@@ -857,7 +655,7 @@ class LDMTrainer:
             
         self.scheduler.set_timesteps(num_inference_steps=1000)
 
-        with autocast(enabled=True):
+        with autocast(device_type='cuda', enabled=True):
             decoded = self.inferer.sample(
                 input_noise=z, diffusion_model=self.unet, scheduler=self.scheduler, 
                 autoencoder_model=self.spatial_ae, conditioning=condition

@@ -99,8 +99,17 @@ def get_test_dataloader(
     images = sorted(glob(os.path.join(file_dir, "**", "image_preprocessed.nii.gz"), recursive=True))
     segs = sorted(glob(os.path.join(file_dir, "**", "mask_preprocessed.nii.gz"), recursive=True))
     
-    data = [{"img": img, "seg": seg, "id": i} for i, (img, seg) in enumerate(zip(images, segs))]
-    data = [d for d in data if nib.load(d['seg']).get_fdata().shape[-1] > 2]
+    data = [
+        {
+            "img": img,
+            "seg": seg,
+            "id": int(seg.split("/")[-3][-4:])
+            }
+        for i, (img, seg) in enumerate(zip(images, segs))
+        ]
+    #data = [d for d in data if nib.load(d['seg']).get_fdata().shape[-1] > 2]
+    
+    print("First and last sample: ", data[0]['id'], data[-1]['id'])
     
     random_sample = data[0]
     print("Random sample: ", random_sample)
@@ -414,6 +423,7 @@ def get_transforms(mode, classes=None, fingerprints=None):
                 EnsureChannelFirstd(keys=["img", "seg"]),
                 EnsureTyped(keys=["img", "seg"]),
                 Resized(keys=["img", "seg"], spatial_size=[128, 128, -1]),
+                Rotate90d(keys=["img", "seg"], spatial_axes=(0, 1), k=3),
                 SpatialPadd(keys=["img", "seg"], spatial_size=[256, 256, -1]),
                 AsDiscreted(keys=["seg"], to_onehot=classes, dim=0),
                 Lambdad(keys=["img", "seg"], func=lambda x: x.permute(3, 0, 1, 2)),

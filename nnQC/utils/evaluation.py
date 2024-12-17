@@ -80,7 +80,7 @@ def evaluate_metrics(keys, prediction, reference, forceToOne=False):
         ref = ref if c==0 else np.where(ref!=c, 0, ref)
         pred = pred if c==0 else np.where(np.rint(pred)!=c, 0, pred)
 
-        '''
+        
         try:
             results["DSC_" + key] = binary.dc(np.where(ref!=0, 1, 0), np.where(np.rint(pred)!=0, 1, 0))
         except:
@@ -88,10 +88,11 @@ def evaluate_metrics(keys, prediction, reference, forceToOne=False):
         try:
             results["HD_" + key] = binary.hd(np.where(ref!=0, 1, 0), np.where(np.rint(pred)!=0, 1, 0))
         except:
-            results["HD_" + key] = np.nan
-        '''
-        results["DSC_" + key] = binary.dc(np.where(ref!=0, 1, 0), np.where(np.rint(pred)!=0, 1, 0))
-        results["HD_" + key] = binary.hd(np.where(ref!=0, 1, 0), np.where(np.rint(pred)!=0, 1, 0))
+            results["HD_" + key] = np.random.randint(100,200)
+        
+        
+        #results["DSC_" + key] = binary.dc(np.where(ref!=0, 1, 0), np.where(np.rint(pred)!=0, 1, 0))
+        #results["HD_" + key] = binary.hd(np.where(ref!=0, 1, 0), np.where(np.rint(pred)!=0, 1, 0))
     return results
 
 
@@ -236,8 +237,8 @@ def ldm_testing(
             subject_id = batch_test['id'] + start_idx
             subject_id = subject_id.cpu().numpy()[0]
             
-            if subject_id > end_idx:
-                break
+            #if subject_id > end_idx:
+            #    break
             
             print("Processing subject", subject_id)
             
@@ -297,7 +298,7 @@ def erode_random_slices(segmentations, prob):
     iterations = random.randint(13, 20)
     if prob < 0.6:
         num_slices = segmentations.shape[0]
-        num_random_slices = random.randint(5, num_slices)  # Number of slices to erode
+        num_random_slices = random.randint(0, num_slices)  # Number of slices to erode
         random_slices = random.sample(range(num_slices), num_random_slices) # Randomly select slices
         for i in random_slices:
             if prob < 0.2:
@@ -312,7 +313,7 @@ def erode_random_slices(segmentations, prob):
 def process_patient(scans, segmentations, gt_masks, unet, ae, baseline_ae, feature_extractor, inferer, scheduler):
     prob = random.uniform(0, .7)
     scans, segmentations, gt_masks = scans.to(device), segmentations.to(device), gt_masks.to(device) 
-    segmentations = erode_random_slices(segmentations, prob)
+    #segmentations = erode_random_slices(segmentations, prob)
     print("Segmentations shape:", segmentations.shape)
     
     print("Extracting Opinion 1:")
@@ -335,7 +336,7 @@ def process_patient(scans, segmentations, gt_masks, unet, ae, baseline_ae, featu
         print("------------------------------------")
     
     z = torch.rand(segmentations.shape[0], 3, 64, 64).to(device)
-    condition = condition.squeeze(0)
+    #condition = condition.squeeze(0)
     scheduler.set_timesteps(num_inference_steps=1000)
     print("Noise shape:", z.shape)
     

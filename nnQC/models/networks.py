@@ -37,9 +37,9 @@ def get_device():
 def load_checkpoint(model, checkpoint_path):
     ckpt = [f for f in os.listdir(checkpoint_path) if re.search(r'best', f)]
     if isinstance(model.module, SpatialAE):
-        model.load_state_dict(torch.load(os.path.join(checkpoint_path, ckpt[0]))['autoencoderkl_state_dict'], strict=False)
+        model.load_state_dict(torch.load(os.path.join(checkpoint_path, ckpt[0]))['autoencoderkl_state_dict'])
     else:
-        model.load_state_dict(torch.load(os.path.join(checkpoint_path, ckpt[0]))['model'], strict=False)
+        model.load_state_dict(torch.load(os.path.join(checkpoint_path, ckpt[0]))['model'])
     print(f'Loaded checkpoint from {os.path.join(checkpoint_path, ckpt[0])}')
     return model
 
