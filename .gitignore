@@ -21,10 +21,6 @@ wheels/
 *.egg
 MANIFEST
 
-# PyTorch
-*.pth
-*.pt
-*.pkl
 
 # Jupyter Notebook
 .ipynb_checkpoints
@@ -63,4 +59,11 @@ Thumbs.db
 *.temp 
 
 UniMed-CLIP/
+unimed_clip_*
 notebooks/
+*.pyc
+*.txt
+*.log
+*.cache
+*.pkl
+

@@ -1,40 +1,27 @@
-# Core dependencies - PyTorch with CUDA 11.3 (compatible with CUDA 11.4 drivers)
-torch==1.12.1+cu113
-torchvision==0.13.1+cu113
-torchaudio==0.12.1
---extra-index-url https://download.pytorch.org/whl/cu113
-
 # Other dependencies
-numpy>=1.21.0
-pandas>=1.3.0
+numpy
+pandas
 
 # Medical imaging
 monai-weekly
-medpy>=0.4.0
-nibabel>=3.2.0
+medpy
+nibabel
 
 # Scientific computing
-scipy>=1.7.0
-scikit-image>=0.19.0
+scipy
+scikit-image
 
 # Visualization
-matplotlib>=3.5.0
-seaborn>=0.11.0
+matplotlib
+seaborn
 
 # Utilities
-tqdm>=4.62.0
-tensorboard>=2.8.0
-Pillow>=8.3.0
+tqdm
+tensorboard
+Pillow
 
 # Configuration and logging
-pyyaml>=5.4.0
-omegaconf>=2.1.0
+pyyaml
+omegaconf
 
-# Optional dependencies for enhanced functionality
-# opencv-python>=4.5.0  # Uncomment if needed
-# albumentations>=1.1.0  # Uncomment if needed
-
-# Development dependencies (optional)
-pytest>=6.2.0
-black>=21.0.0
-flake8>=3.9.0 
+opencv-python
