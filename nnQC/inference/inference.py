@@ -15,8 +15,8 @@ from monai.utils import set_determinism
 import matplotlib.pyplot as plt
 from scipy.ndimage import center_of_mass, shift
 import random
-from nnQC.utils.utils import define_instance
-from nnQC.models.xa import CLIPCrossAttentionGrid
+from utils import define_instance
+from xa import CLIPCrossAttentionGrid
 from monai.inferers import LatentDiffusionInferer
 from monai.networks.schedulers import DDPMScheduler, DDIMScheduler
 from monai.data.utils import first
@@ -232,7 +232,7 @@ def compute_metrics_for_validation(
             # Process each corruption configuration (5 different "models")
             for corruption_idx, config in enumerate(corruption_configs):
                 
-                from nnQC.utils.utils import corrupt_ohe_masks
+                from utils import corrupt_ohe_masks
                 corr_masks = corrupt_ohe_masks(
                     gt_masks, 
                     corruption_prob=config['corruption_prob'], 
@@ -448,7 +448,7 @@ def evaluate_validation_set(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # Prepare data loader
-    from nnQC.utils.utils import prepare_msd_dataloader
+    from utils import prepare_msd_dataloader
     size_divisible = 2 ** (len(args.autoencoder_def["channels"]) + len(args.diffusion_def["channels"]) - 2)
     train_l, val_loader = prepare_msd_dataloader(
         args,

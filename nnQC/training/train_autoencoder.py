@@ -26,8 +26,8 @@ from torch.nn import L1Loss, MSELoss
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
-from nnqc.utils.utils import KL_loss, define_instance, prepare_msd_dataloader, setup_ddp, MultiComponentLoss
-from nnqc.utils.visualize_image import visualize_2d_image
+from nnQC.utils.utils import KL_loss, define_instance, prepare_msd_dataloader, setup_ddp, MultiComponentLoss
+from nnQC.utils.visualize_image import visualize_2d_image
 
 torch.cuda.empty_cache()
 torch.cuda.synchronize()

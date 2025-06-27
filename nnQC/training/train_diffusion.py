@@ -28,16 +28,14 @@ from torch.cuda.amp import autocast
 from torch.cuda.amp import GradScaler
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.tensorboard import SummaryWriter
-from nnqc.utils.utils import (
+from nnQC.utils.utils import (
     define_instance,
     prepare_msd_dataloader,
     setup_ddp,
-    corrupt_ohe_masks,
-    compute_slice_ratio_from_volume,
-    MultiComponentLoss
+    corrupt_ohe_masks
 )
-from nnqc.utils.visualize_image import visualize_2d_image
-from nnqc.models.xa import CLIPCrossAttentionGrid
+from nnQC.utils.visualize_image import visualize_2d_image
+from nnQC.models.xa import CLIPCrossAttentionGrid
 import numpy as np
 
 import gc
