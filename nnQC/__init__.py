@@ -16,8 +16,8 @@ from . import utils
 from . import models
 
 # Main API functions
-from .training.train_autoencoder import train_autoencoder
-from .training.train_diffusion import train_diffusion
+from .training import train_autoencoder
+from .training import train_diffusion
 from .inference.inference import evaluate_validation_set, compute_metrics_for_validation
 
 __all__ = [

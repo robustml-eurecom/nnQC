@@ -15,8 +15,8 @@ from monai.utils import set_determinism
 import matplotlib.pyplot as plt
 from scipy.ndimage import center_of_mass, shift
 import random
-from utils import define_instance
-from xa import CLIPCrossAttentionGrid
+from nnQC.utils import define_instance
+from nnQC.models.xa import CLIPCrossAttentionGrid
 from monai.inferers import LatentDiffusionInferer
 from monai.networks.schedulers import DDPMScheduler, DDIMScheduler
 from monai.data.utils import first

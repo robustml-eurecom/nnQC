@@ -10,14 +10,14 @@ with open("requirements.txt", "r", encoding="utf-8") as fh:
     requirements = [line.strip() for line in fh if line.strip() and not line.startswith("#")]
 
 setup(
-    name="nnqc",
+    name="nnQC",
     version="0.1.0",
-    author="Your Name",
-    author_email="your.email@example.com",
-    description="Neural Network Quality Control for Medical Image Segmentation",
+    author="Vincenzo Marciano",
+    author_email="vincenzo.marciano@eurecom.fr",
+    description="Quality Control for Medical Image Segmentation",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/yourusername/nnQC",
+    url="https://github.com/SanBast/nnQC",
     packages=find_packages(),
     classifiers=[
         "Development Status :: 3 - Alpha",
@@ -43,6 +43,6 @@ setup(
     },
     include_package_data=True,
     package_data={
-        "nnqc": ["config/*.json"],
+        "nnQC": ["config/*.json"],
     },
 ) 
