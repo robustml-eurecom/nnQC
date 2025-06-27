@@ -59,11 +59,14 @@ Thumbs.db
 *.temp 
 
 UniMed-CLIP/
-unimed_clip_*
+trained_weights/
 notebooks/
 *.pyc
 *.txt
 *.log
 *.cache
 *.pkl
+*.pt
+*.pth
+*.h5
 
