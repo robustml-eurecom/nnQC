@@ -1,11 +1,11 @@
 {
     "data_base_dir": "./dataset",
-    "model_dir": "./trained_weights/MSD/liver",
-    "tfevent_path": "./tfevent/MSD/liver",
-    "output_dir": "./output/liver",
+    "model_dir": "./trained_weights/MSD/spleen",
+    "tfevent_path": "./tfevent/MSD/spleen",
+    "output_dir": "./output/spleen",
     "resume_ckpt": false,
     "start_epoch": 0,
     "modality": "ct",
-    "task": "Task03_Liver",
+    "task": "Task09_Spleen",
     "download": false
 }
