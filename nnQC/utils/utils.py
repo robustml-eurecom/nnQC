@@ -10,6 +10,8 @@
 # limitations under the License.
 
 import os
+import re
+import glob
 from datetime import timedelta
 
 import torch
@@ -19,10 +21,11 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 from scipy import ndimage
+from scipy.ndimage import binary_erosion, generate_binary_structure, label, distance_transform_edt, map_coordinates
 import random
 from monai.apps import DecathlonDataset
 from monai.bundle import ConfigParser
-from monai.data import DataLoader
+from monai.data import DataLoader, CacheDataset
 from monai.transforms import (
     CenterSpatialCropd,
     Compose,
@@ -35,16 +38,18 @@ from monai.transforms import (
     RandSpatialCropSamplesd,
     ScaleIntensityRangePercentilesd,
     ScaleIntensityRanged,
+    NormalizeIntensityd,
     SplitDimd,
     SqueezeDimd,
-    Spacingd,
     AsDiscreted,
     CropForegroundd,
-    Resized
+    Resized,
+    CopyItemsd,
 )
 from monai import transforms
 from monai.transforms import MapTransform, Transform
 from monai.config import KeysCollection
+from monai.utils import progress_bar
 from typing import Dict, Hashable, Mapping, Union, Tuple, Optional, List
 import numpy as np
 
@@ -62,6 +67,286 @@ def setup_ddp(rank, world_size):
     dist.barrier()
     device = torch.device(f"cuda:{rank}")
     return dist, device
+
+
+def radial_pinch(mask, pinch_strength=0.5, center=None):
+    """
+    Apply radial pinch effect that squeezes the mask toward its center.
+    """
+    if not mask.any():
+        return mask
+    
+    h, w = mask.shape
+    if center is None:
+        center = (h // 2, w // 2)
+    
+    y, x = np.ogrid[:h, :w]
+    cy, cx = center
+    
+    r = np.sqrt((x - cx)**2 + (y - cy)**2)
+    max_r = np.sqrt(cx**2 + cy**2)
+    
+    if max_r > 0:
+        r_normalized = r / max_r
+        pinch_factor = 1 - pinch_strength * r_normalized
+        pinch_factor = np.maximum(pinch_factor, 0.1)
+        
+        new_x = cx + (x - cx) * pinch_factor
+        new_y = cy + (y - cy) * pinch_factor
+        
+        coords = np.array([new_y.ravel(), new_x.ravel()])
+        pinched = map_coordinates(mask.astype(float), coords, order=1, mode='constant', cval=0)
+        return (pinched.reshape(mask.shape) > 0.5).astype(mask.dtype)
+    
+    return mask
+
+def center_of_mass_pinch(mask, pinch_strength=0.3):
+    """
+    Pinch toward center of mass of the segmentation.
+    """
+    if not mask.any():
+        return mask
+    
+    binary_mask = mask > 0
+    from scipy.ndimage import center_of_mass
+    com = center_of_mass(binary_mask)
+    
+    if np.isnan(com).any():
+        return mask
+    
+    return radial_pinch(mask, pinch_strength, center=(int(com[0]), int(com[1])))
+
+def distance_based_shrink(mask, shrink_factor=0.8):
+    """
+    Shrink based on distance transform - removes pixels at the boundary.
+    """
+    if not mask.any():
+        return mask
+    
+    binary_mask = mask > 0
+    dist = distance_transform_edt(binary_mask)
+    
+    threshold = np.percentile(dist[dist > 0], (1 - shrink_factor) * 100)
+    shrunk_binary = dist >= threshold
+    
+    result = np.zeros_like(mask)
+    result[shrunk_binary] = mask[shrunk_binary]
+    return result
+
+def apply_progressive_pinch(mask, slice_idx, total_slices, 
+                           pinch_type='radial',
+                           max_pinch_strength=0.7,
+                           start_fraction=0.5):
+    """
+    Apply progressive pinching that increases toward the end slices.
+    """
+    start_slice = int(total_slices * start_fraction)
+    
+    if slice_idx < start_slice:
+        return mask
+    
+    normalized_pos = (slice_idx - start_slice) / (total_slices - start_slice - 1) if total_slices > start_slice + 1 else 1
+    current_strength = normalized_pos * max_pinch_strength
+    
+    if pinch_type == 'radial':
+        return radial_pinch(mask, current_strength)
+    elif pinch_type == 'center_of_mass':
+        return center_of_mass_pinch(mask, current_strength)
+    elif pinch_type == 'distance':
+        shrink_factor = 1.0 - current_strength
+        return distance_based_shrink(mask, shrink_factor)
+    else:
+        return mask
+    
+
+def apply_progressive_shrinking(mask, slice_idx, total_slices, 
+                               max_iterations=3, 
+                               erosion_type='linear',
+                               structure_type='cross',
+                               start_fraction=0.5):
+        """
+        Apply progressive erosion to the entire mask (all non-zero values together).
+        This preserves class boundaries while shrinking the overall segmentation.
+        
+        Args:
+            mask: Multi-class mask (numpy array) with values 0, 1, 2, etc.
+            slice_idx: Current slice index (0-based)
+            total_slices: Total number of slices
+            max_iterations: Maximum number of erosion iterations
+            erosion_type: 'linear', 'quadratic', or 'exponential'
+            structure_type: 'cross', 'square', or 'circle'
+            start_fraction: Fraction of slices where erosion starts
+        
+        Returns:
+            Shrunken mask with preserved class boundaries
+        """
+        # Calculate when to start erosion
+        start_slice = int(total_slices * start_fraction)
+        
+        if slice_idx < start_slice:
+            return mask  # No erosion for early slices
+        
+        # Calculate erosion strength based on slice position and type
+        normalized_pos = (slice_idx - start_slice) / (total_slices - start_slice - 1) if total_slices > start_slice + 1 else 1
+        
+        if erosion_type == 'linear':
+            erosion_factor = normalized_pos
+        elif erosion_type == 'quadratic':
+            erosion_factor = normalized_pos ** 2
+        elif erosion_type == 'exponential':
+            erosion_factor = (np.exp(normalized_pos * 2) - 1) / (np.exp(2) - 1)
+        else:
+            erosion_factor = normalized_pos
+        
+        erosion_iterations = int(erosion_factor * max_iterations)
+        
+        if erosion_iterations == 0:
+            return mask
+        
+        # Define structuring element
+        if structure_type == 'cross':
+            structure = np.array([[0, 1, 0],
+                                [1, 1, 1],
+                                [0, 1, 0]], dtype=bool)
+        elif structure_type == 'square':
+            structure = np.ones((3, 3), dtype=bool)
+        elif structure_type == 'circle':
+            structure = generate_binary_structure(2, 1)
+        else:
+            structure = np.array([[0, 1, 0],
+                                [1, 1, 1],
+                                [0, 1, 0]], dtype=bool)
+        
+        # Create binary mask of ALL non-zero regions (classes 1, 2, etc.)
+        binary_mask = mask > 0
+        
+        if not binary_mask.any():
+            return mask  # No segmentation to erode
+        
+        # Apply erosion to the binary mask
+        eroded_binary = binary_mask.copy()
+        for _ in range(erosion_iterations):
+            eroded_binary = binary_erosion(eroded_binary, structure=structure)
+        
+        # Apply the eroded binary mask to preserve only regions that survive erosion
+        # This keeps the original class values but only where the eroded mask is True
+        result_mask = np.zeros_like(mask)
+        result_mask[eroded_binary] = mask[eroded_binary]
+        
+        return result_mask
+
+
+#function that given a root directory, image pattern and label pattern, returns the median spacing of training images
+def compute_spacing(root_dir, args, save=False):
+    """
+    Compute the median spacing of images in the dataset.
+    Args:
+        root_dir: Root directory of the dataset
+        save: Whether to save the computed spacing to a file
+    Returns:
+        Median spacing as a tuple of floats
+    """
+    
+    #check if spacing.txt already exists
+    spacing_file = os.path.join(root_dir, "spacing.txt")
+    if os.path.exists(spacing_file):
+        print(f"Spacing file already exists: {spacing_file}")
+        with open(spacing_file, "r") as f:
+            spacing = f.read().strip().split()
+            spacing = tuple(float(s) for s in spacing)
+        print(f"Loaded spacing: {spacing}")
+        return spacing
+    
+    paired_files = find_paired_files(
+        root_dir=root_dir,
+        image_pattern=args.image_pattern,
+        label_pattern=args.label_pattern,
+        recursive=True,
+        case_sensitive=False
+    )
+    
+    if not paired_files:
+        raise ValueError(f"No paired files found in root dir: {root_dir} with patterns: "
+                         f"images='{args.image_pattern}', labels='{args.label_pattern}'")
+    print(f"Found {len(paired_files)} paired files")
+    spacings = []
+    for i, pair in enumerate(paired_files):
+        #open with nibabel
+        image_path = pair['label']
+        import nibabel as nib
+        img = nib.load(image_path)
+        # orient image to RAS
+        img = nib.as_closest_canonical(img)
+        # get spacing
+        spacing = img.header.get_zooms()[:3]
+        if len(spacing) < 3:
+            raise ValueError(f"Image {image_path} does not have 3D spacing information.")
+        progress_bar(i + 1, len(paired_files), f"Spacing for {pair['label']}: {spacing}")
+        spacings.append(spacing)
+        
+    median_spacing = np.median(spacings, axis=0)
+    median_spacing = tuple(median_spacing)
+    print(f"Computed median spacing: {median_spacing}\n")
+    if save:
+        with open(os.path.join(root_dir, "spacing.txt"), "w") as f:
+            f.write(f"{median_spacing[0]} {median_spacing[1]} {median_spacing[2]}\n")
+    return median_spacing
+
+
+def create_transforms(args, channel=0, sample_axis=0):
+    """
+    Create the same transforms used during validation.
+    
+    Args:
+        args: Configuration arguments
+        channel: Channel to select for image
+        sample_axis: Axis for sampling
+    
+    Returns:
+        MONAI Compose transform
+    """
+    
+    # Calculate size divisible and patch size
+    size_divisible_3d = 2 ** (len(args.autoencoder_def["channels"]) + len(args.diffusion_def["channels"]) - 2)
+    train_patch_size = args.autoencoder_train["patch_size"][:2]  # Take first 2 dimensions
+    
+    # Determine intensity scaling based on modality
+    if hasattr(args, 'modality') and args.modality == 'mri':
+        intensity_transform = ScaleIntensityRangePercentilesd(
+            keys="image", lower=0, upper=99.5, b_min=0, b_max=1
+        )
+    elif hasattr(args, 'modality') and args.modality == 'ct':
+        intensity_transform = ScaleIntensityRanged(
+            keys="image", a_min=-57, a_max=164, b_min=0, b_max=1
+        )
+    elif hasattr(args, 'modality') and args.modality == 'us':
+        intensity_transform = NormalizeIntensityd(
+            keys="image", nonzero=True, channel_wise=True
+        )
+    
+    # Determine compute dtype
+    compute_dtype = torch.float32
+    
+    val_transforms = Compose([
+        LoadImaged(keys=["image", "label"]),
+        EnsureChannelFirstd(keys=["image", "label"]),
+        Lambdad(keys="image", func=lambda x: x[channel, :, :, :]),
+        Lambdad(keys="label", func=lambda x: torch.where(x[0] > .5, 1, 0)) if args.num_classes == 1 else Lambdad(keys="label", func=lambda x: x[0]),
+        EnsureChannelFirstd(keys=["image", "label"], channel_dim="no_channel"),
+        EnsureTyped(keys=["image", "label"]),
+        Orientationd(keys=["image", "label"], axcodes="RAS"),
+        CropAroundNonZerod_Advanced(keys=["image", "label"], reference_key="label", axis=3),
+        CropForegroundd(keys=["image", "label"], source_key="image"),
+        #DivisiblePadd(keys=["image", "label"], k=size_divisible_3d),
+        Resized(keys=["image", "label"], spatial_size=(train_patch_size[0], train_patch_size[1], -1), mode=("area", "nearest")),
+        intensity_transform,
+        CopyItemsd(keys=["label"], times=1, names=["slice_label"]),
+        Lambdad(keys=["slice_label"], func=lambda x: compute_slice_ratio_from_volume(x)[0, 0, 0]),
+        Lambdad(keys=["image", "label"], func=lambda x: x.permute(3, 0, 1, 2)),
+        EnsureTyped(keys=["image", "label", "slice_label"], dtype=compute_dtype),
+    ])
+    
+    return val_transforms
 
 
 def compute_slice_ratio_from_volume(volume):
@@ -203,10 +488,343 @@ class CropAroundNonZerod_Advanced(Transform):
         return d
 
 
+def find_paired_files(
+    root_dir: str,
+    image_pattern: str,
+    label_pattern: str,
+    recursive: bool = True,
+    case_sensitive: bool = False
+) -> List[Dict[str, str]]:
+    """
+    Find paired image and label files based on patterns.
+    
+    Args:
+        root_dir: Root directory to search
+        image_pattern: Pattern for image files (supports wildcards and regex)
+        label_pattern: Pattern for label files (supports wildcards and regex)
+        recursive: Whether to search recursively in subdirectories
+        case_sensitive: Whether pattern matching is case sensitive
+        
+    Returns:
+        List of dictionaries with 'image' and 'label' file paths
+    """
+    
+    if not case_sensitive:
+        image_pattern = image_pattern.lower()
+        label_pattern = label_pattern.lower()
+    
+    def glob_to_regex(pattern):
+        pattern = pattern.replace('*', '.*')
+        pattern = pattern.replace('?', '.')
+        return pattern
+    
+    search_pattern = "**/*" if recursive else "*"
+    all_files = glob.glob(os.path.join(root_dir, search_pattern), recursive=recursive)
+    
+    image_files = []
+    label_files = []
+    
+    for file_path in all_files:
+        if not os.path.isfile(file_path):
+            continue
+            
+        filename = os.path.basename(file_path)
+        if not case_sensitive:
+            filename = filename.lower()
+        
+        if re.search(glob_to_regex(image_pattern), filename):
+            image_files.append(file_path)
+        
+        if re.search(glob_to_regex(label_pattern), filename):
+            label_files.append(file_path)
+    
+    paired_files = []
+    for img_path in image_files:
+        img_dir = os.path.dirname(img_path)
+        img_name = os.path.basename(img_path)
+        
+        img_identifier = extract_identifier(img_name, image_pattern)
+        
+        best_match = None
+        best_score = -1
+        
+        for lbl_path in label_files:
+            lbl_dir = os.path.dirname(lbl_path)
+            lbl_name = os.path.basename(lbl_path)
+            
+            if not (img_dir == lbl_dir or img_dir in lbl_dir or lbl_dir in img_dir):
+                continue
+            
+            lbl_identifier = extract_identifier(lbl_name, label_pattern)
+            score = calculate_match_score(img_identifier, lbl_identifier, img_name, lbl_name)
+            
+            if score > best_score:
+                best_score = score
+                best_match = lbl_path
+        
+        if best_match:
+            paired_files.append({
+                'image': img_path,
+                'label': best_match
+            })
+    
+    return paired_files
+
+
+def extract_identifier(filename: str, pattern: str) -> str:
+    """Extract identifier from filename based on pattern."""
+    identifier = filename
+    
+    for ext in ['.nii.gz', '.nii', '.dcm', '.png', '.jpg', '.tiff']:
+        if identifier.lower().endswith(ext):
+            identifier = identifier[:-len(ext)]
+            break
+    
+    pattern_parts = pattern.replace('*', '').replace('?', '').split('.')
+    for part in pattern_parts:
+        if part and part in identifier:
+            identifier = identifier.replace(part, '')
+    
+    return identifier.strip('_-.')
+
+
+def calculate_match_score(img_id: str, lbl_id: str, img_name: str, lbl_name: str) -> float:
+    """Calculate how well two files match based on identifiers and names."""
+    score = 0.0
+    
+    if img_id == lbl_id:
+        score += 10.0
+    
+    if img_id in lbl_id or lbl_id in img_id:
+        score += 5.0
+    
+    common_parts = set(img_id.split('_')) & set(lbl_id.split('_'))
+    score += len(common_parts) * 2.0
+    
+    img_parts = img_name.split('/')
+    lbl_parts = lbl_name.split('/')
+    if len(img_parts) > 1 and len(lbl_parts) > 1:
+        if img_parts[-2] == lbl_parts[-2]:  # Same parent directory
+            score += 3.0
+    return score
+
+
+def prepare_general_dataloader(
+    args: str,
+    image_pattern: str,
+    label_pattern: str,
+    batch_size: int = 1,
+    patch_size: Tuple[int, int, int] = (64, 64, 64),
+    spacing: Tuple[float, float, float] = (1.0, 1.0, 1.0),
+    sample_axis: int = 2,
+    world_size: int = 1,
+    cache: float = 0.0,
+    randcrop: bool = False,
+    size_divisible=4,
+    num_center_slice=80,
+    amp: bool = False,
+    train_split: float = 0.8,
+    validation_split: float = 0.2,
+    test_split: float = 0.0,
+    random_seed: int = 42,
+    recursive: bool = True,
+    case_sensitive: bool = False,
+    **dataloader_kwargs
+) -> Tuple[DataLoader, DataLoader, Optional[DataLoader]]:
+    
+    print("Searching for paired files in: ", os.path.join("dataset", args.task))
+    print(f"Image pattern: {image_pattern}")
+    print(f"Label pattern: {label_pattern}")
+    
+    # Find paired files
+    paired_files = find_paired_files(
+        root_dir=os.path.join("dataset", args.task),
+        image_pattern=image_pattern,
+        label_pattern=label_pattern,
+        recursive=recursive,
+        case_sensitive=case_sensitive
+    )
+    
+    if not paired_files:
+        raise ValueError(f"No paired files found in given root dir with patterns: "
+                        f"images='{image_pattern}', labels='{label_pattern}'")
+    
+    print(f"Found {len(paired_files)} paired files")
+    
+    # Validate splits
+    assert abs(train_split + validation_split + test_split - 1.0) < 1e-6, \
+        "train_split + validation_split + test_split must equal 1.0"
+    
+    # Split data
+    torch.manual_seed(random_seed)
+    indices = torch.randperm(len(paired_files)).tolist()
+    
+    n_train = int(len(paired_files) * train_split)
+    n_val = int(len(paired_files) * validation_split)
+    n_test = len(paired_files) - n_train - n_val
+    
+    train_indices = indices[:n_train]
+    val_indices = indices[n_train:n_train + n_val]
+    test_indices = indices[n_train + n_val:] if n_test > 0 else []
+    
+    # Create datasets
+    train_data = [paired_files[i] for i in train_indices]
+    val_data = [paired_files[i] for i in val_indices]
+    test_data = [paired_files[i] for i in test_indices] if test_indices else None
+    
+    print(f"Data split: Train={len(train_data)}, Val={len(val_data)}, Test={len(test_data) if test_data else 0}")
+    
+    ddp_bool = world_size > 1
+    channel = args.channel  # 0 = Flair, 1 = T1
+    assert channel in [0, 1, 2, 3], "Choose a valid channel"
+
+    if sample_axis == 0:
+        # sagittal
+        train_patch_size = [1] + patch_size
+        val_patch_size = [num_center_slice] + patch_size
+        size_divisible_3d = [1, size_divisible, size_divisible]
+    elif sample_axis == 1:
+        # coronal
+        train_patch_size = [patch_size[0], 1, patch_size[1]]
+        val_patch_size = [patch_size[0], num_center_slice, patch_size[1]]
+        size_divisible_3d = [size_divisible, 1, size_divisible]
+    elif sample_axis == 2:
+        # axial
+        train_patch_size = patch_size + [1]
+        val_patch_size = patch_size + [num_center_slice]
+        size_divisible_3d = [size_divisible, size_divisible, 1]
+    else:
+        raise ValueError("sample_axis has to be in [0,1,2]")
+
+    if randcrop:
+        train_crop_transform = RandSpatialCropSamplesd(
+            keys=["image", "label", "slice_label"],
+            roi_size=train_patch_size,
+            random_center=False,
+            random_size=False,
+            num_samples=batch_size,
+        )
+    else:
+        train_crop_transform = CenterSpatialCropd(keys=["image", "label"], roi_size=val_patch_size)
+
+    if amp:
+        compute_dtype = torch.float16
+    else:
+        compute_dtype = torch.float32
+
+    if hasattr(args, 'modality') and args.modality == 'mri':
+        intensity_transform = ScaleIntensityRangePercentilesd(
+            keys="image", lower=0, upper=99.5, b_min=0, b_max=1
+        )
+    elif hasattr(args, 'modality') and args.modality == 'ct':
+        intensity_transform = ScaleIntensityRanged(
+            keys="image", a_min=-57, a_max=164, b_min=0, b_max=1
+        )
+    elif hasattr(args, 'modality') and args.modality == 'us':
+        intensity_transform = NormalizeIntensityd(
+            keys="image", nonzero=True, channel_wise=True
+        )    
+    train_transforms = Compose(
+        [
+            LoadImaged(keys=["image", "label"]),
+            EnsureChannelFirstd(keys=["image", "label"]),
+            Lambdad(keys="image", func=lambda x: x[channel, :, :, :]),
+            #Lambdad(keys='label', func=lambda x: print(x.shape)),
+            Lambdad(keys="label", func=lambda x: torch.where(x[0] > .5, 1, 0)) if args.num_classes == 1 else Lambdad(keys="label", func=lambda x:x[0]),
+            EnsureChannelFirstd(keys=["image", "label"], channel_dim="no_channel"),
+            EnsureTyped(keys=["image", "label"]),
+            Orientationd(keys=["image", "label"], axcodes="RAS"),
+            #Spacingd(keys=["image", "label"], pixdim=spacing, mode=("bilinear", "nearest")),
+            CropAroundNonZerod_Advanced(keys=["image", "label"], reference_key="label", axis=3),
+            CropForegroundd(keys=["image", "label"], source_key="image"),
+            Resized(keys=["image", "label"], spatial_size=(train_patch_size[0], train_patch_size[1], -1), mode=("area", "nearest")),
+            transforms.CopyItemsd(keys=["label"], times=1, names=["slice_label"]),
+            Lambdad(keys=["slice_label"], func=lambda x: compute_slice_ratio_from_volume(x)),
+            DivisiblePadd(keys=["image", "label"], k=size_divisible_3d),
+            intensity_transform,
+            train_crop_transform,
+            SqueezeDimd(keys=["image", "label", "slice_label"], dim=1 + sample_axis),
+            Lambdad(keys=["slice_label"], func=lambda x: x[0, 0, 0]),
+            EnsureTyped(keys=["image", "label", "slice_label"], dtype=compute_dtype),
+            
+        ]
+    )
+    val_transforms = Compose(
+        [
+            LoadImaged(keys=["image", "label"]),
+            EnsureChannelFirstd(keys=["image", "label"]),
+            Lambdad(keys="image", func=lambda x: x[channel, :, :, :]),
+            #Lambdad(keys='label', func=lambda x: print(x.shape)),
+            Lambdad(keys="label", func=lambda x: torch.where(x[0] > .5, 1, 0)) if args.num_classes == 1 else Lambdad(keys="label", func=lambda x:x[0]),
+            EnsureChannelFirstd(keys=["image", "label"], channel_dim="no_channel"),
+            EnsureTyped(keys=["image", "label"]),
+            Orientationd(keys=["image", "label"], axcodes="RAS"),
+            #Spacingd(keys=["image", "label"], pixdim=spacing, mode=("bilinear", "nearest")),
+            CropAroundNonZerod_Advanced(keys=["image", "label"], reference_key="label", axis=3),
+            CropForegroundd(keys=["image", "label"], source_key="image"),
+            DivisiblePadd(keys=["image", "label"], k=size_divisible_3d),
+            Resized(keys=["image", "label"], spatial_size=(train_patch_size[0], train_patch_size[1], -1), mode=("area", "nearest")),
+            intensity_transform,
+            transforms.CopyItemsd(keys=["label"], times=1, names=["slice_label"]),
+            Lambdad(keys=["slice_label"], func=lambda x: compute_slice_ratio_from_volume(x)),
+            SplitDimd(keys=["image", "label", "slice_label"], dim=1 + sample_axis, keepdim=False, list_output=True),
+            Lambdad(keys=["slice_label"], func=lambda x: x[0, 0, 0]),
+            EnsureTyped(keys=["image", "label", "slice_label"], dtype=compute_dtype),
+        ]
+    )
+    
+    # Create MONAI datasets
+    train_ds = CacheDataset(data=train_data, transform=train_transforms, cache_rate=cache, num_workers=8)
+    val_ds = CacheDataset(data=val_data, transform=val_transforms, cache_rate=cache, num_workers=8)
+    test_ds = CacheDataset(data=test_data, transform=val_transforms, cache_rate=cache, num_workers=8) if test_data else None
+    
+    # Create dataloaders
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=1,
+        shuffle=False,
+        num_workers=0,
+        **dataloader_kwargs
+    )
+    
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=1,
+        shuffle=False,
+        num_workers=0,
+        **dataloader_kwargs
+    )
+    
+    test_loader = None
+    if test_ds:
+        test_loader = DataLoader(
+            test_ds,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=0,
+            **dataloader_kwargs
+        )
+    
+    # Print sample paths for verification
+    print("\nSample paired files:")
+    for i, pair in enumerate(train_data[:3]):
+        print(f"  {i+1}. Image: {pair['image']}")
+        print(f"     Label: {pair['label']}")
+    
+    print(f'TRAIN: Image shape {train_ds[0][0]["image"].shape}, Label shape {train_ds[0][0]["label"].shape}')
+    print(f'VAL: Image shape {val_ds[0][0]["image"].shape}, Label shape {val_ds[0][0]["label"].shape}\n')
+    
+    if test_loader is None:
+        return train_loader, val_loader
+    
+    return train_loader, val_loader, test_loader
+
+
 def prepare_msd_dataloader(
     args,
     batch_size,
     patch_size,
+    spacing,
     amp=False,
     sample_axis=2,
     randcrop=True,
@@ -255,23 +873,22 @@ def prepare_msd_dataloader(
     else:
         compute_dtype = torch.float32
 
-    num_classes = args.num_classes
     train_transforms = Compose(
         [
             LoadImaged(keys=["image", "label"]),
             EnsureChannelFirstd(keys=["image", "label"]),
             Lambdad(keys="image", func=lambda x: x[channel, :, :, :]),
             Lambdad(keys="label", func=lambda x: x[0, :, :, :]),
-            Lambdad(keys="label", func=lambda x: torch.where(x > .5 , 1, 0)),
+            #Lambdad(keys='label', func=lambda x: print(x.shape)),
+            Lambdad(keys="label", func=lambda x: torch.where(x > .5, 1, 0)) if args.num_classes == 1 else Lambdad(keys="label", func=lambda x:x),
             EnsureChannelFirstd(keys=["image", "label"], channel_dim="no_channel"),
             EnsureTyped(keys=["image", "label"]),
             Orientationd(keys=["image", "label"], axcodes="RAS"),
-            #Spacingd(keys=["image", "label"], pixdim=(3.0, 3.0, 2.0), mode=("bilinear", "nearest")),
-            #CenterSpatialCropd(keys=["image", "label"], roi_size=val_patch_size),
+            #Spacingd(keys=["image", "label"], pixdim=spacing, mode=("bilinear", "nearest")),
             CropAroundNonZerod_Advanced(keys=["image", "label"], reference_key="label", axis=3),
             CropForegroundd(keys=["image", "label"], source_key="image"),
             Resized(keys=["image", "label"], spatial_size=(train_patch_size[0], train_patch_size[1], -1), mode=("area", "nearest")),
-            DivisiblePadd(keys=["image", "label"], k=size_divisible_3d),
+            #DivisiblePadd(keys=["image", "label"], k=size_divisible_3d),
             ScaleIntensityRangePercentilesd(
                 keys="image", lower=0.05, upper=99.5, b_min=0, b_max=1
                 ) if args.modality == 'mri' else ScaleIntensityRanged(
@@ -282,7 +899,6 @@ def prepare_msd_dataloader(
             train_crop_transform,
             SqueezeDimd(keys=["image", "label", "slice_label"], dim=1 + sample_axis),
             Lambdad(keys=["slice_label"], func=lambda x: x[0, 0, 0]),
-            #AsDiscreted(keys=["label"], to_onehot=num_classes, threshold=0.5, dtype=compute_dtype, dim=0),
             EnsureTyped(keys=["image", "label", "slice_label"], dtype=compute_dtype),
             
         ]
@@ -293,14 +909,15 @@ def prepare_msd_dataloader(
             EnsureChannelFirstd(keys=["image", "label"]),
             Lambdad(keys="image", func=lambda x: x[channel, :, :, :]),
             Lambdad(keys="label", func=lambda x: x[0, :, :, :]),
-            Lambdad(keys="label", func=lambda x: torch.where(x > .5, 1, 0)),
+            #Lambdad(keys='label', func=lambda x: print(x.shape)),
+            Lambdad(keys="label", func=lambda x: torch.where(x > .5, 1, 0)) if args.num_classes == 1 else Lambdad(keys="label", func=lambda x:x),
             EnsureChannelFirstd(keys=["image", "label"], channel_dim="no_channel"),
             EnsureTyped(keys=["image", "label"]),
             Orientationd(keys=["image", "label"], axcodes="RAS"),
-            #Spacingd(keys=["image", "label"], pixdim=(3.0, 3.0, 2.0), mode=("bilinear", "nearest")),
+            #Spacingd(keys=["image", "label"], pixdim=spacing, mode=("bilinear", "nearest")),
             CropAroundNonZerod_Advanced(keys=["image", "label"], reference_key="label", axis=3),
             CropForegroundd(keys=["image", "label"], source_key="image"),
-            DivisiblePadd(keys=["image", "label"], k=size_divisible_3d),
+            #DivisiblePadd(keys=["image", "label"], k=size_divisible_3d),
             Resized(keys=["image", "label"], spatial_size=(train_patch_size[0], train_patch_size[1], -1), mode=("area", "nearest")),
             ScaleIntensityRangePercentilesd(
                 keys="image", lower=0, upper=99.5, b_min=0, b_max=1
@@ -379,6 +996,8 @@ def KL_loss(z_mu, z_sigma):
     )
     return torch.sum(kl_loss) / kl_loss.shape[0]
 
+
+###############
 
 def corrupt_ohe_masks(ohe_masks, 
                       corruption_prob=0.7,

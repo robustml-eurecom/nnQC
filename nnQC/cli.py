@@ -27,12 +27,12 @@ def train_diffusion():
 
 def run_inference():
     """CLI entry point for running inference"""
-    from .inference.inference import main as inference_main
+    from .inference.inference import run_inference as inference_main
     inference_main()
 
 def evaluate_validation():
     """CLI entry point for validation evaluation"""
-    from .inference.inference import main as eval_main
+    from .inference.evaluation import run_eval as eval_main
     eval_main()
 
 def main():

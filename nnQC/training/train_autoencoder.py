@@ -17,17 +17,23 @@ import sys
 from pathlib import Path
 
 import torch
+from torch.nn import L1Loss, MSELoss
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.nn.functional as F
+
 from monai.losses import PatchAdversarialLoss, PerceptualLoss
 from monai.losses.dice import DiceCELoss
 from monai.networks.nets import PatchDiscriminator
 from monai.config import print_config
-from monai.utils import set_determinism
-from torch.nn import L1Loss, MSELoss
-from torch.nn.parallel import DistributedDataParallel as DDP
-import torch.nn.functional as F
+from monai.utils import set_determinism, progress_bar
+from monai.transforms import AsDiscrete as OHE
+
 from torch.utils.tensorboard import SummaryWriter
-from nnQC.utils.utils import KL_loss, define_instance, prepare_msd_dataloader, setup_ddp, MultiComponentLoss
-from nnQC.utils.visualize_image import visualize_2d_image
+from nnQC.utils import KL_loss, define_instance, prepare_msd_dataloader, setup_ddp
+from nnQC.utils import visualize_2d_image
+
+import warnings
+warnings.filterwarnings("ignore")
 
 torch.cuda.empty_cache()
 torch.cuda.synchronize()
@@ -84,21 +90,47 @@ def main():
 
     set_determinism(42)
 
+    print("=" * 50)
+    print("Environment variables:")
+    for k, v in env_dict.items():
+        print(f"{k}: {v}")
+    print("=" * 50)
+    print()
+    
     # Step 1: set data loader
     size_divisible = 2 ** (len(args.autoencoder_def["channels"]) - 1)
+    spacing = (1.0, 1.0, 1.0)#compute_spacing('dataset', args, save=True)
     
-    train_loader, val_loader = prepare_msd_dataloader(
-        args,
-        args.autoencoder_train["batch_size"],
-        args.autoencoder_train["patch_size"],
-        sample_axis=args.sample_axis,
-        randcrop=True,
-        rank=rank,
-        world_size=world_size,
-        cache=1.0,
-        download=args.download,
-        size_divisible=size_divisible,
-    )
+    if args.is_msd:
+        from utils import prepare_msd_dataloader
+        train_loader, val_loader = prepare_msd_dataloader(
+            args,
+            args.autoencoder_train["batch_size"],
+            args.autoencoder_train["patch_size"],
+            spacing=spacing,
+            sample_axis=args.sample_axis,
+            randcrop=True,
+            rank=rank,
+            world_size=world_size,
+            cache=1.0,
+            download=args.download,
+            size_divisible=size_divisible,
+        )
+    else:
+        from utils import prepare_general_dataloader
+        train_loader, val_loader = prepare_general_dataloader(
+            args,
+            args.image_pattern,
+            args.label_pattern,
+            args.autoencoder_train["batch_size"],
+            args.autoencoder_train["patch_size"],
+            spacing=spacing,
+            sample_axis=args.sample_axis,
+            randcrop=True,
+            world_size=world_size,
+            cache=1.0,
+            size_divisible=size_divisible,
+        )
 
     # Step 2: Define Autoencoder KL network and discriminator
     autoencoder = define_instance(args, "autoencoder_def").to(device)
@@ -161,8 +193,8 @@ def main():
             include_background=True,
             to_onehot_y=False,
             softmax=False,
-            batch=True,
             sigmoid=True,
+            batch=True,
         )
         if rank == 0:
             print("Use dice ce loss")
@@ -191,13 +223,17 @@ def main():
         Path(tensorboard_path).mkdir(parents=True, exist_ok=True)
         tensorboard_writer = SummaryWriter(tensorboard_path)
 
+    ohe = OHE(to_onehot=args.num_classes, dim=1)
+    
     # Step 4: training
     autoencoder_warm_up_n_epochs = 5
     max_epochs = args.autoencoder_train["max_epochs"]
     val_interval = args.autoencoder_train["val_interval"]
     best_val_recon_epoch_loss = 100.0
     total_step = 0
-
+    recons_loss = 0.0
+    
+    print("\nStart training autoencoder...")
     for epoch in range(max_epochs):
         # train
         autoencoder.train()
@@ -206,10 +242,18 @@ def main():
             # if ddp, distribute data across n gpus
             train_loader.sampler.set_epoch(epoch)
             val_loader.sampler.set_epoch(epoch)
+            
         for step, batch in enumerate(train_loader):
-            if step > 100:
-                break
+            progress_bar(
+                step,
+                len(train_loader),
+                f"epoch {epoch}, \
+                    Total Loss: {recons_loss if (step > 1) else 0:.4f}",
+            )
+            
             images = batch["label"].to(device)
+            if args.num_classes > 1:
+                images = ohe(images)
 
             # train Generator part
             optimizer_g.zero_grad(set_to_none=True)
@@ -217,7 +261,10 @@ def main():
 
             recons_loss = intensity_loss(reconstruction, images)
             kl_loss = KL_loss(z_mu, z_sigma)
-            p_loss = loss_perceptual(reconstruction.argmax(1, keepdims=True).float(), images.argmax(1, keepdims=True).float())
+            if args.num_classes > 1:
+                p_loss = loss_perceptual(F.softmax(reconstruction, dim=1).argmax(1, keepdim=True).float(), images.argmax(1, keepdim=True).float())
+            else:
+                p_loss = loss_perceptual((torch.sigmoid(reconstruction) > 0.5).float(), images.float())
             loss_g = recons_loss + kl_weight * kl_loss + perceptual_weight * p_loss
 
             if epoch > autoencoder_warm_up_n_epochs:
@@ -257,14 +304,20 @@ def main():
             autoencoder.eval()
             val_recon_epoch_loss = 0
             for step, batch in enumerate(val_loader):
-                if step > 3:
-                    break
                 images = batch["label"].to(device)
+                if args.num_classes > 1:
+                    images = ohe(images)
+                    
                 with torch.no_grad():
                     reconstruction, z_mu, z_sigma = autoencoder(images)
                     recons_loss = intensity_loss(
                         reconstruction.float(), images.float()
-                    ) + perceptual_weight * loss_perceptual(reconstruction.argmax(1, keepdims=True).float(), images.argmax(1, keepdims=True).float())
+                    )
+                    if args.num_classes > 1:
+                        p_loss = loss_perceptual(F.softmax(reconstruction, dim=1).argmax(1, keepdim=True).float(), images.argmax(1, keepdim=True).float())
+                    else:
+                        p_loss = loss_perceptual((torch.sigmoid(reconstruction) > 0.5).float(), images.float())
+                    recons_loss += kl_weight * KL_loss(z_mu, z_sigma) + perceptual_weight * p_loss
 
                 val_recon_epoch_loss += recons_loss.item()
 
@@ -296,12 +349,12 @@ def main():
                 tensorboard_writer.add_scalar("val_recon_loss", val_recon_epoch_loss, epoch)
                 tensorboard_writer.add_image(
                     "val_img",
-                    visualize_2d_image(images[mid_slice, 0, ...]).transpose([2, 1, 0]),
+                    visualize_2d_image(images[mid_slice].argmax(0) if args.num_classes > 1 else images[mid_slice, 0]).transpose([2, 1, 0]),
                     epoch,
                 )
                 tensorboard_writer.add_image(
                     "val_recon",
-                    visualize_2d_image(F.sigmoid(reconstruction[mid_slice, 0, ...])).transpose([2, 1, 0]),
+                    visualize_2d_image(F.softmax(reconstruction[mid_slice], dim=0).argmax(0) if args.num_classes > 1 else (F.sigmoid(reconstruction[mid_slice, 0]) > 0.5).float()).transpose([2, 1, 0]),
                     epoch,
                 )        
             print()

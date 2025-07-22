@@ -9,6 +9,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import numpy as np
 import argparse
 import json
 import logging
@@ -18,25 +19,26 @@ from pathlib import Path
 
 import torch
 import torch.nn.functional as F
+from torch.amp import autocast
+from torch.amp import GradScaler
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.tensorboard import SummaryWriter
+
 from monai.inferers import LatentDiffusionInferer
 from monai.networks.schedulers import DDPMScheduler, DDIMScheduler
 from monai.networks.nets.diffusion_model_unet import DiffusionModelUNet
+from monai.transforms import AsDiscrete as OHE
 from monai.losses.dice import DiceCELoss, GeneralizedDiceLoss
 from monai.config import print_config
 from monai.utils import first, set_determinism, progress_bar
-from torch.cuda.amp import autocast
-from torch.cuda.amp import GradScaler
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.tensorboard import SummaryWriter
-from nnQC.utils.utils import (
+
+from nnQC.utils import (
     define_instance,
-    prepare_msd_dataloader,
     setup_ddp,
-    corrupt_ohe_masks
+    corrupt_ohe_masks,
+    visualize_2d_image
 )
-from nnQC.utils.visualize_image import visualize_2d_image
 from nnQC.models.xa import CLIPCrossAttentionGrid
-import numpy as np
 
 import gc
 torch.cuda.empty_cache()
@@ -98,20 +100,38 @@ def main():
     
     # Step 1: set data loader
     size_divisible = 2 ** (len(args.autoencoder_def["channels"]) + len(args.diffusion_def["channels"]) - 2)
-
-    train_loader, val_loader = prepare_msd_dataloader(
-        args,
-        args.diffusion_train["batch_size"],
-        args.diffusion_train["patch_size"],
-        sample_axis=args.sample_axis,
-        randcrop=True,
-        rank=rank,
-        world_size=world_size,
-        cache=1.0,
-        download=args.download,
-        size_divisible=size_divisible,
-        amp=True,
-    )
+    spacing = (1.0, 1.0, 1.0) #compute_spacing('dataset', args, save=True)
+    
+    if args.is_msd:
+        from utils import prepare_msd_dataloader
+        train_loader, val_loader = prepare_msd_dataloader(
+            args,
+            args.autoencoder_train["batch_size"],
+            args.autoencoder_train["patch_size"],
+            spacing,
+            sample_axis=args.sample_axis,
+            randcrop=True,
+            rank=rank,
+            world_size=world_size,
+            cache=1.0,
+            download=args.download,
+            size_divisible=size_divisible,
+        )
+    else:
+        from utils import prepare_general_dataloader
+        train_loader, val_loader = prepare_general_dataloader(
+            args,
+            args.image_pattern,
+            args.label_pattern,
+            args.autoencoder_train["batch_size"],
+            args.autoencoder_train["patch_size"],
+            spacing,
+            sample_axis=args.sample_axis,
+            randcrop=True,
+            world_size=world_size,
+            cache=1.0,
+            size_divisible=size_divisible,
+        )
 
     # initialize tensorboard writer
     if rank == 0:
@@ -129,16 +149,21 @@ def main():
     autoencoder.load_state_dict(torch.load(trained_g_path, map_location=map_location, weights_only=True))
     logging.info(f"Rank {rank}: Load trained autoencoder from {trained_g_path}\n")
     
+    ohe = OHE(to_onehot=args.num_classes, dim=1)
+    
     with torch.no_grad():
         with autocast("cuda", enabled=True):
             check_data = first(train_loader)
-            #print(check_data["label"][10].shape)
-            z = autoencoder.encode_stage_2_inputs(check_data["label"].to(device))
+            check_input = check_data["label"].to(device)
+            if args.num_classes > 1:
+                check_input = ohe(check_input)
+                
+            z = autoencoder.encode_stage_2_inputs(check_input)
             if rank == 0:
                 print(f"Latent feature shape {z.shape}")
                 tensorboard_writer.add_image(
                     "train_img",
-                    visualize_2d_image(check_data["label"][10, 0]).transpose([2, 1, 0]),
+                    visualize_2d_image(check_input[10,0]).transpose([2, 1, 0]),
                     1,
                 )
                 print(f"Scaling factor set to {1/torch.std(z)}")
@@ -152,7 +177,12 @@ def main():
     # Define Diffusion Model
     unet = define_instance(args, "diffusion_def").to(device)
     xa = CLIPCrossAttentionGrid(output_dim=args.diffusion_def['cross_attention_dim'], grid_reduction='column_softmax').to(device)
-    embed = torch.nn.Embedding(num_embeddings=2, embedding_dim=512).to(device)
+    #embed = torch.nn.Embedding(num_embeddings=2, embedding_dim=512).to(device)
+    embed = torch.nn.Sequential(
+        torch.nn.Linear(1, 32), 
+        torch.nn.GELU(), 
+        torch.nn.Linear(32, args.diffusion_def['cross_attention_dim'])
+        ).to(device)
     
     trained_diffusion_path = os.path.join(args.model_dir, "diffusion_unet.pt")
     trained_diffusion_path_last = os.path.join(args.model_dir, "diffusion_unet_last.pt")
@@ -171,7 +201,9 @@ def main():
             embed.load_state_dict(torch.load(trained_embed_path, map_location=map_location, weights_only=True))
             print(
                 f"\nRank {rank}: Load trained diffusion model from",
-                trained_diffusion_path, "and cross attention grid from", trained_xa_path, "\n"
+                trained_diffusion_path, ", cross attention grid from", trained_xa_path,
+                "positional embedding from", trained_embed_path,
+                f"starting from epoch {start_epoch}.\n"
             )
         except:
             print(f"\nRank {rank}: Train diffusion model from scratch.\n")
@@ -203,12 +235,39 @@ def main():
             param.requires_grad = False
         else:
             param.requires_grad = True
-    
-    trainable_params = [p for p in xa.parameters() if p.requires_grad]
-    #trainable_params = []
-    trainable_params.extend(list(unet.parameters()))
-    trainable_params.extend(list(embed.parameters()))
-    optimizer_diff = torch.optim.Adam(params=trainable_params, lr=args.diffusion_train["lr"])
+
+    param_groups = []
+
+    xa_trainable_params = [p for p in xa.parameters() if p.requires_grad]
+    if xa_trainable_params:
+        param_groups.append({
+            'params': xa_trainable_params, 
+            'lr': args.diffusion_train["lr"],  # Lower initial LR for cross-attention
+            'name': 'cross_attention',
+        })
+
+    unet_params = [p for p in unet.parameters() if p.requires_grad]  # Replace with your UNet
+    if unet_params:
+        param_groups.append({
+            'params': unet_params, 
+            'lr': args.diffusion_train["lr"],  # Full LR for main model
+            'name': 'unet',
+            'weight_decay': 1e-6
+        })
+
+    embed_params = list(embed.parameters())
+    if embed_params:
+        param_groups.append({
+            'params': embed_params, 
+            'lr': 1e-4,
+            'name': 'slice_embeddings'
+        })
+
+    # Create optimizer
+    optimizer_diff = torch.optim.Adam(
+        param_groups,
+        betas=(0.9, 0.999)
+    )
     
 
     lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(
@@ -217,6 +276,7 @@ def main():
     )
 
     # Step 4: training
+    
     max_epochs = args.diffusion_train["max_epochs"]
     val_interval = args.diffusion_train["val_interval"]
     autoencoder.eval()
@@ -260,17 +320,20 @@ def main():
             )
             
             images = batch["label"].to(device)
+            if args.num_classes > 1:
+                images = ohe(images)
+                
             scans = batch["image"].to(device).float()
-            slice_ratios = batch["slice_label"].to(device).long()
-            #print(slice_ratios.shape)
+            slice_ratios = batch["slice_label"].unsqueeze(1).float().to(device)
+            
             corr_mask = corrupt_ohe_masks(images, corruption_prob=1., fp_prob=.8)
+            if args.num_classes > 1:
+                # argmax and scale to [0, 1]
+                corr_mask = corr_mask.argmax(1, keepdim=True) / args.num_classes
+                
             slice_embeddings = embed(slice_ratios).float().to(device)
-            text = [template]*scans.shape[0]
-
-            #c = xa(scans, mask=None, text=text)[0].float().unsqueeze(1).to(device)
-            #c = xa(scans, mask=corr_mask, text=None)[0].float().unsqueeze(1).to(device)
+            
             c = xa(scans, ext_features=slice_embeddings)[0].float().unsqueeze(1).to(device)
-            #c = slice_embeddings
             
             optimizer_diff.zero_grad(set_to_none=True)
 
@@ -278,9 +341,6 @@ def main():
                 # Generate random noise
                 noise_shape = [images.shape[0]] + list(z.shape[1:])
                 true_noise = torch.randn(noise_shape, dtype=images.dtype).to(device)
-                # cat noise and corrupted mask latent
-                #z_corr = autoencoder.encode_stage_2_inputs(corr_mask) * scale_factor
-                #noise = true_noise
                 mask_resized = F.interpolate(corr_mask.float(), size=z.shape[2:], mode='nearest')
                 noise = torch.cat([true_noise, mask_resized], dim=1)
 
@@ -304,7 +364,7 @@ def main():
                     diffusion_model=unet,
                     noise=noise,
                     timesteps=timesteps,
-                    condition=c,
+                    condition=c
                 )
 
                 loss_1 = F.mse_loss(noise_pred.float(), true_noise.float())
@@ -343,27 +403,29 @@ def main():
                 with autocast("cuda", enabled=True):
                     # compute val loss
                     for step, batch in enumerate(val_loader):
-                        #if step > 1:
-                        #    break
+                        if step > 50:
+                            break
                         images = batch["label"].to(device)
+                        if args.num_classes > 1:
+                            images = ohe(images)
+                
                         scans = batch["image"].to(device).float()
-                        slice_ratios = batch["slice_label"].to(device).long()
+                        slice_ratios = batch["slice_label"].unsqueeze(1).float().to(device)
                         
                         text = [template]*scans.shape[0]
                         corr_mask = corrupt_ohe_masks(images, corruption_prob=1., fp_prob=.8, erosion_prob=.8)
+                        if args.num_classes > 1:
+                            # argmax and scale to [0, 1]
+                            corr_mask = corr_mask.argmax(1, keepdim=True) / args.num_classes
+                        
                         slice_embeddings = embed(slice_ratios).float().to(device)
                                         
                         c, _, _ = xa(scans, ext_features=slice_embeddings)
-                        #c, _, _ = xa(scans, text=text)
                         c = c.float().to(device).unsqueeze(1)
-                        #c = slice_embeddings
                         
                         noise_shape = [images.shape[0]] + list(z.shape[1:])
                         true_noise = torch.randn(noise_shape, dtype=images.dtype).to(device)
                         
-                        z_corr = autoencoder.encode_stage_2_inputs(corr_mask) * scale_factor
-                        #noise = true_noise
-                        #noise = z_corr
                         mask_resized = F.interpolate(corr_mask.float(), size=z.shape[2:], mode='nearest')
                         noise = torch.cat([true_noise, mask_resized], dim=1)
 
@@ -385,7 +447,7 @@ def main():
                             diffusion_model=unet,
                             noise=noise,
                             timesteps=timesteps,
-                            condition=c,
+                            condition=c
                         )
                         val_loss_1 = F.mse_loss(noise_pred.float(), true_noise.float())
                         val_loss = val_loss_1
@@ -436,45 +498,37 @@ def main():
                                 "Save trained latent diffusion model to",
                                 trained_diffusion_path,
                             )
-
-                        #c, _ , _ = xa(scans[10:11,...], text=text[10:11])
-                        #c, _ , _ = xa(scans[10:11,...], ext_feature=slice_embeddings[10:11, ...])
-                        #c = c.float().to(device).unsqueeze(1)                        
-                        #c = slice_embeddings[10:11, ...]
                         
-                        scheduler.set_timesteps(200)            
+                        slice_selected = min(50, images.shape[0] - 1)
+                        scheduler.set_timesteps(50)            
                         # visualize synthesized image
-                        if (epoch) % (val_interval) == 0:  # time cost of synthesizing images is large
+                        
+                        if (epoch) % (val_interval) == 0:  
                             synthetic_images = inferer.sample(
-                                input_noise=noise[10:11, ...],
+                                input_noise=noise[slice_selected-1:slice_selected, ...],
                                 autoencoder_model=inferer_autoencoder,
                                 diffusion_model=unet,
                                 scheduler=scheduler,
-                                conditioning=c[10:11, ...],
+                                conditioning=c[slice_selected-1:slice_selected, ...]
                             )
                             tensorboard_writer.add_image(
                                 "val_corrupted_mask",
-                                visualize_2d_image(corr_mask[10, 0]).transpose([2, 1, 0]),
+                                visualize_2d_image(corr_mask[slice_selected, 0]).transpose([2, 1, 0]),
                                 epoch,
                             )
                             tensorboard_writer.add_image(
                                 "val_diff_synimg",
-                                visualize_2d_image(F.sigmoid(synthetic_images[0, 0])).transpose([2, 1, 0]),
+                                visualize_2d_image(F.softmax(synthetic_images[0]).argmax(dim=0) if args.num_classes > 1 else F.sigmoid(synthetic_images[0, 0])).transpose([2, 1, 0]),
                                 epoch,
                             )
                             tensorboard_writer.add_image(
                                 "val_denoised_latent",
-                                visualize_2d_image(F.sigmoid(denoised_latent[0, 0])).transpose([2, 1, 0]),
+                                visualize_2d_image(F.softmax(denoised_latent[0]).argmax(dim=0) if args.num_classes > 1 else F.sigmoid(denoised_latent[0, 0])).transpose([2, 1, 0]),
                                 epoch,
                             )
                             tensorboard_writer.add_image(
                                 "val_diff_mask",
-                                visualize_2d_image(images[10, 0]).transpose([2, 1, 0]),
-                                epoch,
-                            )
-                            tensorboard_writer.add_image(
-                                "val_ae_recon_mask",
-                                visualize_2d_image(F.sigmoid(inferer_autoencoder(images[10:11])[0])[0, 0]).transpose([2, 1, 0]),
+                                visualize_2d_image(images[slice_selected].argmax(dim=0) if args.num_classes > 1 else images[slice_selected,0]).transpose([2, 1, 0]),
                                 epoch,
                             )
 

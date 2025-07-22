@@ -35,10 +35,10 @@ setup(
     install_requires=requirements,
     entry_points={
         "console_scripts": [
-            "nnqc-train-ae=nnqc.cli:train_autoencoder",
-            "nnqc-train-diffusion=nnqc.cli:train_diffusion", 
-            "nnqc-inference=nnqc.cli:run_inference",
-            "nnqc-evaluate=nnqc.cli:evaluate_validation",
+            "nnqc-train-ae=nnQC.cli:train_autoencoder",
+            "nnqc-train-diffusion=nnQC.cli:train_diffusion", 
+            "nnqc-inference=nnQC.cli:run_inference",
+            "nnqc-evaluate=nnQC.cli:evaluate_validation",
         ],
     },
     include_package_data=True,
