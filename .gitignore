@@ -1,0 +1,47 @@
+# Trained weights and model artifacts — distributed separately, see README.
+trained_weights/
+*.pt
+*.pth
+*.safetensors
+
+# Datasets — never check into the repo.
+dataset/
+misc_dataset/
+data/
+*.nii.gz
+*.nii
+
+# Logs / TensorBoard / W&B / experiment outputs
+logs/
+tfevent/
+wandb/
+output/
+runs/
+*.log
+
+# Local environment notes / scratch
+.local/
+.scratch/
+notes/
+TODO.md
+
+# Python / packaging
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.uv-cache/
+.python-version
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+
+# Jupyter checkpoints
+.ipynb_checkpoints/

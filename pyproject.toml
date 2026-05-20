@@ -1,0 +1,91 @@
+[project]
+name = "nnqc"
+version = "0.1.0"
+description = "Segmentation quality control via a 2D latent diffusion model that reconstructs the correct mask from a corrupted one."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [
+    { name = "robustml-eurecom" },
+]
+keywords = [
+    "medical-imaging",
+    "segmentation",
+    "quality-control",
+    "diffusion-models",
+    "latent-diffusion",
+    "monai",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+]
+
+dependencies = [
+    # core deep-learning stack
+    "torch>=2.4",
+    "torchvision>=0.19",
+    # MONAI generative models (DDIMScheduler, AutoencoderKL, DiffusionModelUNet)
+    "monai[all]>=1.4",
+    "monai-generative>=0.2.3 ; python_version < '3.13'",
+    # data + I/O
+    "numpy>=1.26",
+    "nibabel>=5.3",
+    "scipy>=1.13",
+    "scikit-image>=0.24",
+    "pillow>=10",
+    "einops>=0.8",
+    "tqdm>=4.66",
+    # CLIP cross-attention (UniMedCLIP)
+    "open-clip-torch>=2.24",
+    "timm>=1.0",
+    "transformers>=4.40",
+    # logging / viz
+    "tensorboard>=2.17",
+    "matplotlib>=3.8",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.5",
+    "pytest>=8",
+]
+
+[project.urls]
+Repository = "https://github.com/robustml-eurecom/nnQC"
+Issues = "https://github.com/robustml-eurecom/nnQC/issues"
+
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["nnqc"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "nnqc/",
+    "scripts/",
+    "configs/",
+    "tutorials/",
+    "README.md",
+    "LICENSE",
+    "CITATION.cff",
+    "pyproject.toml",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+extend-select = ["E", "F", "I", "W", "UP"]
+ignore = ["E501"]

@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+title: "nnQC: Segmentation Quality Control via Latent Diffusion"
+message: "If you use this software, please cite it as below."
+type: software
+authors:
+  - given-names: "Marvin"
+    family-names: "Marciano"
+    affiliation: "EURECOM"
+  - name: "robustml-eurecom"
+repository-code: "https://github.com/robustml-eurecom/nnQC"
+license: MIT
+version: 0.1.0
+date-released: 2026-05-20
+keywords:
+  - medical-imaging
+  - segmentation
+  - quality-control
+  - latent-diffusion
+  - MONAI
