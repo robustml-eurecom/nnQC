@@ -1,16 +1,46 @@
 cff-version: 1.2.0
-title: "nnQC: Segmentation Quality Control via Latent Diffusion"
-message: "If you use this software, please cite it as below."
+title: "Diffusion-Based Quality Control of Medical Image Segmentations across Organs"
+message: "If you use this software, please cite the paper below."
 type: software
 authors:
-  - given-names: "Marvin"
+  - given-names: "Vincenzo"
     family-names: "Marciano"
-    affiliation: "EURECOM"
-  - name: "robustml-eurecom"
+  - given-names: "Hava"
+    family-names: "Chaptoukaev"
+  - given-names: "Virginia"
+    family-names: "Fernandez"
+  - given-names: "M Jorge"
+    family-names: "Cardoso"
+  - given-names: "Sebastien"
+    family-names: "Ourselin"
+  - given-names: "Michela"
+    family-names: "Antonelli"
+  - given-names: "Maria A"
+    family-names: "Zuluaga"
 repository-code: "https://github.com/robustml-eurecom/nnQC"
 license: MIT
 version: 0.1.0
-date-released: 2026-05-20
+date-released: 2025-11-12
+preferred-citation:
+  type: article
+  title: "Diffusion-Based Quality Control of Medical Image Segmentations across Organs"
+  authors:
+    - given-names: "Vincenzo"
+      family-names: "Marciano"
+    - given-names: "Hava"
+      family-names: "Chaptoukaev"
+    - given-names: "Virginia"
+      family-names: "Fernandez"
+    - given-names: "M Jorge"
+      family-names: "Cardoso"
+    - given-names: "Sebastien"
+      family-names: "Ourselin"
+    - given-names: "Michela"
+      family-names: "Antonelli"
+    - given-names: "Maria A"
+      family-names: "Zuluaga"
+  journal: "arXiv preprint arXiv:2511.09588"
+  year: 2025
 keywords:
   - medical-imaging
   - segmentation

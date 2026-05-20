@@ -122,41 +122,10 @@ CUDA_VISIBLE_DEVICES=0 python scripts/eval_visualize.py \
     --num-volumes 3 --num-steps 5
 ```
 
-Writes a 3×4 PNG (scan | corrupted | GT | sampled) per volume under
+Writes a 3x4 PNG (scan | corrupted | GT | sampled) per volume under
 `<output_dir>/eval_step_*/`. We have found **5 DDIM steps** to give the
-best quality / latency trade-off - increase `--num-steps` to 20–50 for a
+best quality / latency trade-off; increase `--num-steps` to 20-50 for a
 finer denoising schedule.
-
-### 4. QC calibration: Dice(GT, corr) vs Dice(pgt, corr)
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/eval_qc_calibration.py \
-    -c configs/prostate/config.json \
-    -e configs/prostate/env.json \
-    --split val --num-corruptions 5 --num-steps 5
-```
-
-For each subject in the val split, generates 5 morphological corruptions
-spanning a target Dice range, runs the model, and reports:
-
-- `Dice(GT, corruption)` - the true mask quality, treated as ground-truth signal
-- `Dice(pgt, corruption)` - the **nnQC predicted quality** (the QC signal)
-- **MAE / RMSE / Pearson r** between the two across all subjects
-
-For multi-class models add `--merge-foreground-classes` to evaluate a
-binary foreground-vs-background calibration.
-
-### 5. DDIM step sweep (sanity-check sampling cost)
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/sweep_ddim_steps.py \
-    -c configs/prostate/config.json \
-    -e configs/prostate/env.json
-```
-
-Renders one panel per subject with samples at [5, 10, 20, 30, 40, 50]
-DDIM steps using the **same** initial noise + corruption per row, so the
-only variable is the denoising schedule.
 
 ---
 
@@ -173,9 +142,7 @@ nnQC/
 ├── scripts/                    Top-level CLI entry points
 │   ├── train_autoencoder.py
 │   ├── train_diffusion.py
-│   ├── eval_visualize.py
-│   ├── eval_qc_calibration.py
-│   └── sweep_ddim_steps.py
+│   └── eval_visualize.py
 ├── configs/
 │   ├── prostate/{config,env}.json
 │   └── spleen/{config,env}.json
@@ -188,39 +155,16 @@ nnQC/
 
 ---
 
-## Reproducing the released results
-
-We trained two reference checkpoints for the v0.1 release:
-
-| Task | Train epochs | Best val Dice loss (EMA) | DDIM 5 step calibration MAE |
-|------|-------------:|-------------------------:|-----------------------------:|
-| MSD Prostate (3-class) | 4000 | 0.314 | 0.18 (per-class) / **0.04 (merged binary)** |
-| MSD Spleen (binary)    | 4000 | - | **0.056** |
-
-Both runs use:
-- `lr = 2.5e-5` with a 20-epoch linear warm-up → cosine annealing to `1e-6`
-- EMA of UNet weights (`decay=0.999`), val + checkpoint always uses EMA
-- Gradient clipping to `max_norm=1.0`
-- Reconstruction-Dice term activates at epoch 100 (`warmup_dice_epochs`)
-- DDIM 5-step sampling for inference
-
-See [tutorials/TUTORIAL.md](tutorials/TUTORIAL.md) for the full recipe,
-including the corruption-aware training loop and how to re-run the QC
-calibration.
-
----
-
 ## Citation
 
-If you use nnQC, please cite the release:
+If you use nnQC, please cite:
 
 ```bibtex
-@software{nnqc_2026,
-  title  = {nnQC: Segmentation Quality Control via Latent Diffusion},
-  author = {robustml-eurecom},
-  year   = {2026},
-  url    = {https://github.com/robustml-eurecom/nnQC},
-  version = {0.1.0},
+@article{marciano2025diffusion,
+  title={Diffusion-Based Quality Control of Medical Image Segmentations across Organs},
+  author={Marcian{\`o}, Vincenzo and Chaptoukaev, Hava and Fernandez, Virginia and Cardoso, M Jorge and Ourselin, S{\'e}bastien and Antonelli, Michela and Zuluaga, Maria A},
+  journal={arXiv preprint arXiv:2511.09588},
+  year={2025}
 }
 ```
 

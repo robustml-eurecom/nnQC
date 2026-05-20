@@ -5,9 +5,7 @@ This tutorial walks through:
 1. preparing the dataset,
 2. training the autoencoder,
 3. training the diffusion UNet,
-4. visualizing reconstructions,
-5. computing the calibration MAE between `Dice(GT, corruption)` and the
-   nnQC predicted Dice `Dice(pgt, corruption)`.
+4. visualizing reconstructions.
 
 All commands assume the working directory is the repo root.
 
@@ -135,91 +133,23 @@ CUDA_VISIBLE_DEVICES=0 python scripts/eval_visualize.py \
 For each val volume it picks the apex / mid / base slice (by
 `slice_ratio`), corrupts the GT mask, and runs DDIM denoising. Output:
 
-- `<output_dir>/eval_step_<step>/vol{00,01,02}.png` - 3×4 grid:
+- `<output_dir>/eval_step_<step>/vol{00,01,02}.png` - 3x4 grid:
   `scan | corrupted | GT | sample`
 - TensorBoard figures under `<tfevent_path>/eval/`
 
-If you want a sweep over different denoising lengths in one shot:
-
-```bash
-python scripts/sweep_ddim_steps.py \
-    -c configs/prostate/config.json \
-    -e configs/prostate/env.json \
-    --steps-list 5 10 20 30 40 50
-```
-
-Empirically, 5 DDIM steps gave the cleanest samples on our prostate
-checkpoint; longer chains added subtle artifacts. Re-check on your own
+Empirically, 5 DDIM steps gave the cleanest samples on our reference
+checkpoints; longer chains added subtle artifacts. Re-check on your own
 checkpoint.
 
 ---
 
-## 5. QC calibration
-
-The whole point of nnQC: the discrepancy between an input mask and the
-model's reconstruction should track the true error against the GT.
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/eval_qc_calibration.py \
-    -c configs/prostate/config.json \
-    -e configs/prostate/env.json \
-    --split val \
-    --num-corruptions 5 \
-    --num-candidates 25 \
-    --num-steps 5
-```
-
-Per subject the script:
-
-1. Samples 25 candidate corruptions with randomized intensity.
-2. Picks 5 whose `Dice(GT, corruption)` is closest to the target Dice
-   levels (default `[0.10, 0.31, 0.52, 0.73, 0.95]`).
-3. Runs the model (DDIM 5 steps) and computes `Dice(pgt, corruption)`.
-
-Outputs in `<output_dir>/qc_calibration/`:
-
-| File | Content |
-|------|---------|
-| `results.csv` | subject, target, Dice(GT,corr), Dice(pgt,corr), abs_err |
-| `scatter.png` | scatter of Dice(pgt,corr) vs Dice(GT,corr) with the identity line |
-| `per_subject_*.png` | 3-row panel per subject (scan+GT, corruption, pgt) for each corruption level |
-| stdout | overall MAE, RMSE, Pearson r |
-
-For multi-class models you can also collapse foreground channels into a
-single binary mask before computing Dice:
-
-```bash
-python scripts/eval_qc_calibration.py … --merge-foreground-classes \
-    --out-dir output/prostate_v2/qc_calibration_binary
-```
-
-In our reference run the prostate v2 model was poorly calibrated at the
-per-class level (MAE 0.18) but **well calibrated as a binary foreground
-QC signal** (MAE 0.04, Pearson r 0.78).
-
-### What you should see on a healthy model
-
-- **Scatter plot** clustered near the identity line `y = x`.
-- **MAE < 0.1** on the val split.
-- **Pearson r > 0.7** between true and predicted Dice.
-
-If a single subject's points sit well off the line (as vol 0 did in our
-prostate calibration), inspect its `per_subject_*.png`: usually the
-model has placed the prostate in the wrong anatomical location because
-the scan / slice-ratio conditioning was misled.
-
----
-
-## 6. Where to go from here
+## 5. Where to go from here
 
 - **Reproduce on your own task**: copy `configs/spleen/` to
   `configs/my_task/`, edit `env.json` to point at your data, edit
   `num_classes` in `config.json`. The training scripts auto-branch
   between `prepare_general_dataloader` (paired files) and
   `prepare_msd_dataloader` (MSD format) on `is_msd`.
-- **Tighten the calibration**: the Dice term (`lambda_recon`) is the
-  main lever for forcing pgt to match GT spatially. Try `0.3` if your
-  scatter has too much vertical spread at high target Dice.
 - **Cheaper sampling**: 5 DDIM steps are sufficient in our setting. If
-  you reduce further (e.g., 2-3 steps), validate on the calibration
-  scatter before deploying.
+  you reduce further (e.g., 2-3 steps), validate visual quality on the
+  apex / mid / base panels before deploying.
