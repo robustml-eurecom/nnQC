@@ -149,6 +149,35 @@ Common overrides (CLI flag / Python kwarg): `epochs`, `lr`, `batch_size`,
 
 ---
 
+## Quality control on a new mask
+
+Once a model is trained, `check()` is the one-call QC entry point. Give it a
+scan and a candidate segmentation; it preprocesses both (orientation, slice and
+foreground crop, resize, intensity scaling), reconstructs the mask the model
+believes is correct, and returns the Dice agreement as the QC score. The
+reconstruction is mapped back onto the input volume's grid (shape + affine), so
+you can save or overlay it directly.
+
+```python
+import nnqc
+
+result = nnqc.check("scan.nii.gz", "candidate_mask.nii.gz", task="prostate")
+print(result.qc_score)            # volume Dice(candidate, reconstruction); low = suspect mask
+print(result.qc_score_per_class)  # per-class Dice (multi-class models)
+print(result.slice_scores)        # per-slice Dice, with result.slice_ratios
+result.save("reconstruction.nii.gz")   # written on the input grid
+```
+
+```bash
+nnqc check --task prostate --image scan.nii.gz --mask candidate_mask.nii.gz \
+    --save reconstruction.nii.gz
+```
+
+A high `qc_score` means the candidate agrees with what the model reconstructs
+(likely good); a low score flags a probable segmentation error.
+
+---
+
 ## Repository layout
 
 ```
@@ -159,6 +188,7 @@ nnQC/
 │   ├── config.py               JSON + kwargs config resolver, task presets
 │   ├── train.py                Training loops (autoencoder + diffusion)
 │   ├── evaluate.py             DDIM sampling + reconstruction panels
+│   ├── infer.py                check(): one-call QC on a scan + mask pair
 │   ├── xa.py                   CLIPCrossAttentionGrid (UniMedCLIP wrapper)
 │   ├── corruptions.py          Morphologically realistic mask corruptions
 │   ├── utils.py                Dataloaders, transforms, helpers

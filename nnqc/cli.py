@@ -100,6 +100,15 @@ def build_parser() -> argparse.ArgumentParser:
     ev.add_argument("--num-steps", type=int, default=5)
     ev.add_argument("--step", type=int, default=0)
 
+    p_ck = sub.add_parser("check", help="QC one scan + candidate mask pair")
+    _add_common(p_ck)
+    ck = p_ck.add_argument_group("check options")
+    ck.add_argument("--image", required=True, help="path to the scan volume (NIfTI)")
+    ck.add_argument("--mask", required=True, help="path to the candidate mask volume (NIfTI)")
+    ck.add_argument("--checkpoint", choices=["last", "best"], default="best")
+    ck.add_argument("--num-steps", type=int, default=5)
+    ck.add_argument("--save", default=None, help="write the reconstruction to this NIfTI path")
+
     sub.add_parser("list-tasks", help="list bundled task presets")
     return parser
 
@@ -115,21 +124,33 @@ def main(argv=None) -> int:
         return 0
 
     # Import here so `nnqc list-tasks` / `--version` stay fast (no torch import).
-    from nnqc.train import train_autoencoder, train_diffusion
-    from nnqc.evaluate import evaluate
-
     overrides = _collect_overrides(args)
     common = dict(config=args.config, env=args.env, task=args.task, device=args.device, seed=args.seed)
 
     if args.command == "train-autoencoder":
+        from nnqc.train import train_autoencoder
         train_autoencoder(gpus=args.gpus, **common, **overrides)
     elif args.command == "train-diffusion":
+        from nnqc.train import train_diffusion
         train_diffusion(gpus=args.gpus, **common, **overrides)
     elif args.command == "evaluate":
+        from nnqc.evaluate import evaluate
         evaluate(
             checkpoint=args.checkpoint, num_volumes=args.num_volumes,
             num_steps=args.num_steps, step=args.step, **common, **overrides,
         )
+    elif args.command == "check":
+        from nnqc.infer import check
+        result = check(
+            args.image, args.mask, checkpoint=args.checkpoint,
+            num_steps=args.num_steps, return_volume=args.save is not None,
+            **common, **overrides,
+        )
+        print(f"QC score: {result.qc_score:.4f}")
+        if result.qc_score_per_class:
+            print("per-class:", {k: round(v, 4) for k, v in result.qc_score_per_class.items()})
+        if args.save:
+            print("saved reconstruction to", result.save(args.save))
     return 0
 
 

@@ -33,12 +33,15 @@ _LAZY = {
     "train_autoencoder": ("nnqc.train", "train_autoencoder"),
     "train_diffusion": ("nnqc.train", "train_diffusion"),
     "evaluate": ("nnqc.evaluate", "evaluate"),
+    "check": ("nnqc.infer", "check"),
+    "QCResult": ("nnqc.infer", "QCResult"),
 }
 
 __all__ = ["__version__", "available_tasks", "resolve_config", *_LAZY]
 
 if TYPE_CHECKING:  # for type checkers / IDEs only
     from nnqc.evaluate import evaluate
+    from nnqc.infer import QCResult, check
     from nnqc.train import train_autoencoder, train_diffusion
 
 
