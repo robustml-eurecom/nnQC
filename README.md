@@ -32,11 +32,15 @@ source .venv/bin/activate
 uv pip install -e .
 ```
 
-(Plain `pip install -e .` also works.)
+(Plain `pip install -e .` also works.) Installing registers the `nnqc`
+command and ships the bundled task presets, so `--task prostate` works
+out of the box.
 
 The package depends on PyTorch with CUDA. If you need a specific CUDA
 version, install `torch` first from the official wheel index, then
-`pip install -e .` will pick up the rest.
+`uv pip install -e .` will pick up the rest. To run a one-off command
+without activating the venv, prefix it with `uv run` (e.g.
+`uv run nnqc list-tasks`).
 
 ### Pretrained weights
 
@@ -62,70 +66,86 @@ trained_weights/
 
 nnQC is trained in **two stages**:
 
-1. **Autoencoder** (`scripts/train_autoencoder.py`) - encodes/decodes
-   one-hot segmentation masks into a low-dimensional latent.
-2. **Diffusion UNet** (`scripts/train_diffusion.py`) - denoises the mask
-   latent, conditioned on (a) the corrupted mask resized to latent
-   resolution, (b) CLIP image features of the scan, and (c) a slice-ratio
-   embedding.
+1. **Autoencoder** - encodes/decodes one-hot segmentation masks into a
+   low-dimensional latent.
+2. **Diffusion UNet** - denoises the mask latent, conditioned on (a) the
+   corrupted mask resized to latent resolution, (b) CLIP image features of
+   the scan, and (c) a slice-ratio embedding.
 
-Both stages are configured by **two JSON files**:
+Both stages read a **config pair**, either a bundled preset (`--task`) or an
+explicit JSON pair:
 
-- `-e <env.json>` - paths and dataset settings (model dir, task name,
-  modality, num_classes, image/label glob patterns, resume options).
-- `-c <config.json>` - network architecture, training hyper-parameters,
-  noise scheduler settings.
+- **env.json** - paths and dataset settings (model dir, task name, modality,
+  num_classes, image/label glob patterns, resume options).
+- **config.json** - network architecture, training hyper-parameters, noise
+  scheduler settings.
 
-Two reference task configurations ship with the repo:
+Any field can be overridden from the CLI or the Python API without editing
+the JSON. Bundled presets:
 
-| Task | num_classes | Modality | Config dir |
-|------|-------------|----------|------------|
-| MSD Prostate (apex / TZ / PZ) | 3 | MRI T2 | `configs/prostate/` |
-| MSD Spleen | 1 | CT | `configs/spleen/` |
+| Task | num_classes | Modality | Preset |
+|------|-------------|----------|--------|
+| MSD Prostate | 3 | MRI T2 | `prostate` |
+| MSD Prostate binary | 1 | MRI T2 | `prostate_bin` |
+| MSD Spleen | 1 | CT | `spleen` |
+
+Run `nnqc list-tasks` to see what is installed. The same JSON files also live
+under `configs/` for you to copy and edit.
 
 ---
 
-## Quickstart
+## Quickstart (CLI)
 
-### 1. Train the autoencoder
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/train_autoencoder.py \
-    -c configs/prostate/config.json \
-    -e configs/prostate/env.json \
-    -g 1
-```
-
-`-g` is the **number of GPUs** (use `torchrun --nproc_per_node=N ... -g N`
-for multi-GPU). The autoencoder is saved as `<model_dir>/autoencoder.pt`.
-
-### 2. Train the diffusion UNet
+A single `nnqc` command with subcommands:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/train_diffusion.py \
-    -c configs/prostate/config.json \
-    -e configs/prostate/env.json \
-    -g 1
+# 1. autoencoder
+nnqc train-autoencoder --task prostate --epochs 500 --lr 5e-5 --device 0
+
+# 2. diffusion UNet (needs <model_dir>/autoencoder.pt)
+nnqc train-diffusion --task prostate --epochs 4000 --lr 2.5e-5 \
+    --scheduler cosine --warmup-dice-epochs 100 --device 0
+
+# 3. visualize reconstructions
+nnqc evaluate --task prostate --num-volumes 3 --num-steps 5 --device 0
 ```
 
-The diffusion script requires `<model_dir>/autoencoder.pt` to exist.
+Use an explicit config pair instead of a preset with
+`--config configs/prostate/config.json --env configs/prostate/env.json`.
+Multi-GPU uses torchrun: `torchrun --nproc_per_node=2 -m nnqc.cli
+train-diffusion --task prostate -g 2`.
+
 EMA-smoothed UNet weights are written to `diffusion_unet.pt` (best by val
 loss) and `diffusion_unet_last.pt` (latest); cross-attention and
-slice-embedding weights follow the same convention.
+slice-embedding weights follow the same convention. **5 DDIM steps** give the
+best quality / latency trade-off; raise `--num-steps` to 20-50 for a finer
+schedule.
 
-### 3. Visualize reconstructions
+## Quickstart (notebook / Python)
 
-```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/eval_visualize.py \
-    -c configs/prostate/config.json \
-    -e configs/prostate/env.json \
-    --num-volumes 3 --num-steps 5
+```python
+import nnqc
+
+nnqc.train_autoencoder(task="prostate", epochs=500, lr=5e-5, device=0)
+nnqc.train_diffusion(
+    task="prostate", epochs=4000, lr=2.5e-5,
+    scheduler="cosine", warmup_dice_epochs=100, device=0,
+)
+nnqc.evaluate(task="prostate", num_volumes=3, num_steps=5, device=0)
+
+# resume a run, or point at your own data:
+nnqc.train_diffusion(task="prostate", resume=True, start_epoch=1000, epochs=4000)
+nnqc.train_diffusion(
+    config="configs/prostate/config.json",
+    env="configs/prostate/env.json",
+    data_dir="/data/my_prostate", model_dir="/data/runs/prostate",
+)
 ```
 
-Writes a 3x4 PNG (scan | corrupted | GT | sampled) per volume under
-`<output_dir>/eval_step_*/`. We have found **5 DDIM steps** to give the
-best quality / latency trade-off; increase `--num-steps` to 20-50 for a
-finer denoising schedule.
+Common overrides (CLI flag / Python kwarg): `epochs`, `lr`, `batch_size`,
+`patch_size`, `val_interval`, `scheduler` (`cosine|constant|step|exponential`),
+`warmup_dice_epochs`, `lambda_recon`, `ema_decay`, `num_train_timesteps`,
+`model_dir`, `output_dir`, `data_dir`, `resume`, `start_epoch`.
 
 ---
 
@@ -134,16 +154,20 @@ finer denoising schedule.
 ```
 nnQC/
 ├── nnqc/                       Importable package
-│   ├── __init__.py
+│   ├── __init__.py             Public API: train_autoencoder/train_diffusion/evaluate
+│   ├── cli.py                  `nnqc` command dispatcher
+│   ├── config.py               JSON + kwargs config resolver, task presets
+│   ├── train.py                Training loops (autoencoder + diffusion)
+│   ├── evaluate.py             DDIM sampling + reconstruction panels
 │   ├── xa.py                   CLIPCrossAttentionGrid (UniMedCLIP wrapper)
 │   ├── corruptions.py          Morphologically realistic mask corruptions
 │   ├── utils.py                Dataloaders, transforms, helpers
-│   └── visualize.py            TensorBoard image helpers
-├── scripts/                    Top-level CLI entry points
-│   ├── train_autoencoder.py
-│   ├── train_diffusion.py
-│   └── eval_visualize.py
-├── configs/
+│   ├── visualize.py            TensorBoard image helpers
+│   └── presets/                Bundled task configs (shipped in the wheel)
+│       ├── prostate/{config,env}.json
+│       ├── prostate_bin/{config,env}.json
+│       └── spleen/{config,env}.json
+├── configs/                    Editable copies of the presets
 │   ├── prostate/{config,env}.json
 │   └── spleen/{config,env}.json
 ├── tutorials/

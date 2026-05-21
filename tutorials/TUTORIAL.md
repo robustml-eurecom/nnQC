@@ -21,7 +21,12 @@ uv pip install -e .
 
 # Download the UniMedCLIP backbone (referenced by xa.py).
 # Place it at: trained_weights/unimed_clip_vit_b16.pt
+
+nnqc list-tasks   # prostate, prostate_bin, spleen
 ```
+
+Everything below has two equivalent forms: a `nnqc` CLI command and a Python
+call you can paste into a notebook. Pick whichever you prefer.
 
 ---
 
@@ -29,8 +34,8 @@ uv pip install -e .
 
 ### Prostate (general loader)
 
-`config/env_prostate.json` expects a directory tree under
-`./dataset/<task>/` with paired files matched by glob:
+The `prostate` preset (`nnqc/presets/prostate/env.json`) expects a directory
+tree under `./dataset/<task>/` with paired files matched by glob:
 
 ```
 dataset/Task05Prostate_flat/
@@ -45,7 +50,7 @@ The split is 80% train / 20% val with a fixed seed (42).
 
 ### Spleen (MSD loader)
 
-`config/env_spleen.json` uses MONAI's MSD layout:
+The `spleen` preset uses MONAI's MSD layout:
 
 ```
 misc_dataset/Task09_Spleen/
@@ -66,10 +71,12 @@ Train the AutoencoderKL on one-hot segmentation masks. With
 `num_classes = 1` (spleen) it has a single channel.
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/train_autoencoder.py \
-    -c configs/prostate/config.json \
-    -e configs/prostate/env.json \
-    -g 1
+nnqc train-autoencoder --task prostate --device 0
+```
+
+```python
+import nnqc
+nnqc.train_autoencoder(task="prostate", device=0)   # add epochs=, lr=, batch_size= to override
 ```
 
 Look at `<tfevent_path>/autoencoder/` in TensorBoard for the recon Dice
@@ -89,13 +96,17 @@ You can stop once the val curve plateaus.
 ## 3. Stage 2 - Diffusion UNet
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/train_diffusion.py \
-    -c configs/prostate/config.json \
-    -e configs/prostate/env.json \
-    -g 1
+nnqc train-diffusion --task prostate --device 0 \
+    --scheduler cosine --warmup-dice-epochs 100
 ```
 
-What this script does each epoch:
+```python
+import nnqc
+nnqc.train_diffusion(task="prostate", device=0,
+                     scheduler="cosine", warmup_dice_epochs=100)
+```
+
+What this stage does each epoch:
 
 1. Samples a batch of *clean* masks, encodes them to the latent space.
 2. Generates a *corrupted* mask via the v2 morphologically-realistic
@@ -124,10 +135,12 @@ at inference.
 ## 4. Visualize reconstructions
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/eval_visualize.py \
-    -c configs/prostate/config.json \
-    -e configs/prostate/env.json \
-    --num-volumes 3 --num-steps 5
+nnqc evaluate --task prostate --num-volumes 3 --num-steps 5 --device 0
+```
+
+```python
+import nnqc
+nnqc.evaluate(task="prostate", num_volumes=3, num_steps=5, device=0)
 ```
 
 For each val volume it picks the apex / mid / base slice (by
@@ -147,9 +160,18 @@ checkpoint.
 
 - **Reproduce on your own task**: copy `configs/spleen/` to
   `configs/my_task/`, edit `env.json` to point at your data, edit
-  `num_classes` in `config.json`. The training scripts auto-branch
-  between `prepare_general_dataloader` (paired files) and
-  `prepare_msd_dataloader` (MSD format) on `is_msd`.
+  `num_classes` in `config.json`, then run with
+  `--config configs/my_task/config.json --env configs/my_task/env.json`.
+  Or skip the files entirely and pass overrides:
+  `nnqc train-diffusion --task spleen --data-dir /data/mine --model-dir /data/runs/mine --num-classes 1`.
+  Training auto-branches between `prepare_general_dataloader` (paired files)
+  and `prepare_msd_dataloader` (MSD format) on `is_msd`.
+- **Resume / extend a run**: `nnqc train-diffusion --task prostate --resume
+  --start-epoch 1000 --epochs 4000`. Resume loads the `_last` checkpoints,
+  fast-forwards the LR schedule, and reads `diffusion_best_val.txt` so the
+  best checkpoint is never overwritten by a worse resumed validation.
 - **Cheaper sampling**: 5 DDIM steps are sufficient in our setting. If
   you reduce further (e.g., 2-3 steps), validate visual quality on the
   apex / mid / base panels before deploying.
+- **Pick a scheduler**: `--scheduler cosine|constant|step|exponential`
+  (cosine is the default: linear warmup then cosine anneal).

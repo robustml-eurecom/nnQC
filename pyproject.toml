@@ -59,6 +59,9 @@ dev = [
     "pytest>=8",
 ]
 
+[project.scripts]
+nnqc = "nnqc.cli:main"
+
 [project.urls]
 Repository = "https://github.com/robustml-eurecom/nnQC"
 Issues = "https://github.com/robustml-eurecom/nnQC/issues"
@@ -67,13 +70,14 @@ Issues = "https://github.com/robustml-eurecom/nnQC/issues"
 requires = ["hatchling>=1.21"]
 build-backend = "hatchling.build"
 
+# Files under nnqc/ (including nnqc/presets/*.json) ship in the wheel by
+# default, so `--task prostate` works after a plain `uv pip install nnqc`.
 [tool.hatch.build.targets.wheel]
 packages = ["nnqc"]
 
 [tool.hatch.build.targets.sdist]
 include = [
     "nnqc/",
-    "scripts/",
     "configs/",
     "tutorials/",
     "README.md",
@@ -81,6 +85,11 @@ include = [
     "CITATION.cff",
     "pyproject.toml",
 ]
+
+[tool.uv]
+# nnqc depends on a CUDA torch build; let the user's environment / index
+# provide the right wheel rather than pinning one here.
+package = true
 
 [tool.ruff]
 line-length = 100
