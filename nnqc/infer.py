@@ -126,6 +126,9 @@ def check(
     device=None,
     seed: int = 42,
     return_volume: bool = True,
+    auto_download: bool = True,
+    hf_token=None,
+    hf_repo: str = "sanbast/nnQC",
     **overrides,
 ) -> QCResult:
     """Run nnQC on one scan + candidate mask pair.
@@ -200,7 +203,10 @@ def check(
     masks = mask_vol.permute(3, 0, 1, 2).contiguous()    # [D, 1, P, P]
     ratios = (torch.arange(n_slices, device=dev).float() / max(n_slices - 1, 1)).unsqueeze(1)
 
-    # --- models --------------------------------------------------------------
+    # --- models (auto-fetch weights from the Hub if missing) -----------------
+    if auto_download and task is not None:
+        from nnqc.hub import ensure_weights
+        ensure_weights(task, cfg.model_dir, token=hf_token, repo_id=hf_repo)
     autoencoder = define_instance(cfg, "autoencoder_def").to(dev).eval()
     autoencoder.load_state_dict(torch.load(
         f"{cfg.model_dir}/autoencoder.pt", map_location=dev, weights_only=True))

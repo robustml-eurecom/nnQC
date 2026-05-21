@@ -109,6 +109,13 @@ def build_parser() -> argparse.ArgumentParser:
     ck.add_argument("--num-steps", type=int, default=5)
     ck.add_argument("--save", default=None, help="write the reconstruction to this NIfTI path")
 
+    p_dl = sub.add_parser("download", help="download trained weights from the Hugging Face Hub")
+    p_dl.add_argument("task", help="task name (matches the weights folder on the Hub)")
+    p_dl.add_argument("--repo-id", default="sanbast/nnQC", help="Hub model repo id")
+    p_dl.add_argument("--dest", default=None, help="destination dir (default trained_weights/<task>)")
+    p_dl.add_argument("--token", default=None, help="HF token (else uses HF_TOKEN env)")
+    p_dl.add_argument("--overwrite", action="store_true")
+
     sub.add_parser("list-tasks", help="list bundled task presets")
     return parser
 
@@ -121,6 +128,13 @@ def main(argv=None) -> int:
         print("Available task presets:" if tasks else "No bundled task presets found.")
         for t in tasks:
             print(f"  - {t}")
+        return 0
+
+    if args.command == "download":
+        from nnqc.hub import download_weights
+        dest = download_weights(args.task, repo_id=args.repo_id, dest=args.dest,
+                                token=args.token, overwrite=args.overwrite)
+        print("weights in", dest)
         return 0
 
     # Import here so `nnqc list-tasks` / `--version` stay fast (no torch import).

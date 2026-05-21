@@ -45,20 +45,25 @@ without activating the venv, prefix it with `uv run` (e.g.
 ### Pretrained weights
 
 Trained checkpoints are **not** distributed in the git repo because they
-exceed 1 GB per task. Download them separately and place under
-`trained_weights/<TASK>/`. The exact URL is published on the GitHub
-release page. Expected layout:
+exceed 1 GB per task. They live in the Hugging Face Hub repo
+[`sanbast/nnQC`](https://huggingface.co/sanbast/nnQC) (private) and can be
+fetched with the built-in helper:
 
+```python
+import nnqc
+nnqc.download_weights("prostate")     # -> trained_weights/prostate/
 ```
-trained_weights/
-└── MSD_Prostate_v2/
-    ├── autoencoder.pt
-    ├── diffusion_unet.pt          # best (EMA, by val loss)
-    ├── diffusion_unet_last.pt     # latest (EMA)
-    ├── xa.pt        / xa_last.pt
-    ├── embed.pt     / embed_last.pt
-└── unimed_clip_vit_b16.pt          # UniMedCLIP backbone
+
+```bash
+nnqc download prostate                 # same, from the CLI
 ```
+
+`check` and `evaluate` also auto-download a task's weights on first use if
+they are missing. Because the repo is private, supply a read token via the
+`HF_TOKEN` environment variable (or `huggingface-cli login`). The four files
+per task (`autoencoder.pt`, `diffusion_unet.pt`, `xa.pt`, `embed.pt`) are
+placed under `trained_weights/<task>/`, where `xa.pt` already bundles the
+UniMedCLIP backbone.
 
 ---
 
@@ -189,6 +194,7 @@ nnQC/
 │   ├── train.py                Training loops (autoencoder + diffusion)
 │   ├── evaluate.py             DDIM sampling + reconstruction panels
 │   ├── infer.py                check(): one-call QC on a scan + mask pair
+│   ├── hub.py                  download_weights(): fetch checkpoints from HF Hub
 │   ├── xa.py                   CLIPCrossAttentionGrid (UniMedCLIP wrapper)
 │   ├── corruptions.py          Morphologically realistic mask corruptions
 │   ├── utils.py                Dataloaders, transforms, helpers

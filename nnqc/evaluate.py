@@ -41,6 +41,9 @@ def evaluate(
     step: int = 0,
     device=None,
     seed: int = 42,
+    auto_download: bool = True,
+    hf_token=None,
+    hf_repo: str = "sanbast/nnQC",
     **overrides,
 ):
     """Sample reconstructions and write comparison panels.
@@ -90,6 +93,10 @@ def evaluate(
         )
 
     ohe = OHE(to_onehot=cfg.num_classes, dim=1)
+
+    if auto_download and task is not None:
+        from nnqc.hub import ensure_weights
+        ensure_weights(task, cfg.model_dir, token=hf_token, repo_id=hf_repo)
 
     autoencoder = define_instance(cfg, "autoencoder_def").to(dev).eval()
     autoencoder.load_state_dict(torch.load(
