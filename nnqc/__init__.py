@@ -36,6 +36,10 @@ _LAZY = {
     "check": ("nnqc.infer", "check"),
     "QCResult": ("nnqc.infer", "QCResult"),
     "download_weights": ("nnqc.hub", "download_weights"),
+    "Metric": ("nnqc.metrics", "Metric"),
+    "DiceMetric": ("nnqc.metrics", "DiceMetric"),
+    "IoUMetric": ("nnqc.metrics", "IoUMetric"),
+    "FunctionMetric": ("nnqc.metrics", "FunctionMetric"),
 }
 
 __all__ = ["__version__", "available_tasks", "resolve_config", *_LAZY]
@@ -44,6 +48,7 @@ if TYPE_CHECKING:  # for type checkers / IDEs only
     from nnqc.evaluate import evaluate
     from nnqc.hub import download_weights
     from nnqc.infer import QCResult, check
+    from nnqc.metrics import DiceMetric, FunctionMetric, IoUMetric, Metric
     from nnqc.train import train_autoencoder, train_diffusion
 
 

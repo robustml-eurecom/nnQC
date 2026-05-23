@@ -60,6 +60,10 @@ dev = [
     "ruff>=0.5",
     "pytest>=8",
 ]
+# Distance-based QC metrics (hd95, assd, ...) used via metric="hd95".
+metrics = [
+    "medpy>=0.4",
+]
 
 [project.scripts]
 nnqc = "nnqc.cli:main"

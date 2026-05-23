@@ -178,8 +178,44 @@ nnqc check --task prostate --image scan.nii.gz --mask candidate_mask.nii.gz \
     --save reconstruction.nii.gz
 ```
 
-A high `qc_score` means the candidate agrees with what the model reconstructs
-(likely good); a low score flags a probable segmentation error.
+With the default Dice metric, a high `qc_score` means the candidate agrees with
+what the model reconstructs (likely good); a low score flags a probable
+segmentation error.
+
+### Custom QC metric
+
+The agreement metric is pluggable via `metric=`. Pass a built-in name, a bare
+callable `fn(pred, ref) -> float` (e.g. from `medpy`), or a `Metric` subclass.
+`QCResult` reports `metric_name` and `higher_is_better` so you know how to read
+the score.
+
+```python
+import nnqc
+
+# built-in by name
+nnqc.check(img, mask, task="prostate", metric="iou")
+
+# any third-party function (install medpy: pip install nnqc[metrics])
+from medpy.metric.binary import hd95
+nnqc.check(img, mask, task="prostate",
+           metric=nnqc.FunctionMetric(hd95, name="hd95", higher_is_better=False))
+# (or metric="hd95", which already knows lower-is-better)
+
+# a custom metric class
+from nnqc.metrics import Metric
+
+class MyMetric(Metric):
+    name = "my_metric"
+    higher_is_better = True
+    def score(self, pred, ref):       # pred, ref: binary numpy arrays
+        return float((pred & ref).sum() / max(pred.sum(), 1))
+
+nnqc.check(img, mask, task="prostate", metric=MyMetric())
+```
+
+Empty-mask edge cases are handled by the base class (`empty_value` /
+`empty_both_value`), so per-slice scoring never crashes on blank apex/base
+slices. From the CLI use `--metric dice|iou|hd95|assd`.
 
 ---
 
@@ -195,6 +231,7 @@ nnQC/
 │   ├── evaluate.py             DDIM sampling + reconstruction panels
 │   ├── infer.py                check(): one-call QC on a scan + mask pair
 │   ├── hub.py                  download_weights(): fetch checkpoints from HF Hub
+│   ├── metrics.py              Pluggable QC metrics (Dice, IoU, medpy adapters)
 │   ├── xa.py                   CLIPCrossAttentionGrid (UniMedCLIP wrapper)
 │   ├── corruptions.py          Morphologically realistic mask corruptions
 │   ├── utils.py                Dataloaders, transforms, helpers

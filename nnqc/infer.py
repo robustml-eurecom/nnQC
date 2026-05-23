@@ -51,12 +51,17 @@ class QCResult:
     Attributes
     ----------
     qc_score
-        Volume-level Dice between the input mask and the reconstruction
-        (foreground union). 1.0 = perfect agreement, low = likely a bad mask.
+        Volume-level agreement between the candidate mask and the reconstruction
+        (foreground union), computed with the chosen ``metric``. With the
+        default Dice, 1.0 = perfect agreement and low = likely a bad mask; with
+        a distance metric (e.g. HD95) the orientation is reversed.
+    metric_name, higher_is_better
+        Identity of the metric used and whether larger means better, so callers
+        can interpret ``qc_score`` without guessing.
     qc_score_per_class
-        Per-class Dice (multi-class models only).
+        Per-class score (multi-class models only).
     slice_scores, slice_ratios
-        Per-slice Dice and normalized slice position (apex=0 ... base=1).
+        Per-slice score and normalized slice position (apex=0 ... base=1).
     reconstruction
         Reconstructed label map as a MONAI ``MetaTensor`` on the *input* grid
         (same shape/affine as the candidate mask), or ``None`` if the inverse
@@ -66,6 +71,8 @@ class QCResult:
     """
 
     qc_score: float
+    metric_name: str = "dice"
+    higher_is_better: bool = True
     qc_score_per_class: dict[int, float] = field(default_factory=dict)
     slice_scores: np.ndarray | None = None
     slice_ratios: np.ndarray | None = None
@@ -106,12 +113,6 @@ def _nonzero_slice_bounds(label):  # label: [1, H, W, D]
     return int(nz[0].item()), int(nz[-1].item()) + 1
 
 
-def _binary_dice(a, b, eps=1e-6):
-    a = (a > 0.5).float()
-    b = (b > 0.5).float()
-    return float(((2 * (a * b).sum() + eps) / (a.sum() + b.sum() + eps)).item())
-
-
 @torch.no_grad()
 def check(
     image,
@@ -120,6 +121,7 @@ def check(
     env=None,
     task=None,
     *,
+    metric=None,
     checkpoint: str = "best",
     num_steps: int = 5,
     inference_batch: int = 16,
@@ -141,6 +143,11 @@ def check(
         Model configuration, as in the other entry points (a bundled ``task=``
         preset, or an explicit ``config=``/``env=`` pair). ``model_dir`` must
         contain the trained checkpoints.
+    metric
+        How to score candidate-vs-reconstruction agreement. Accepts a metric
+        name (``"dice"``, ``"iou"``, ``"hd95"``, ``"assd"`` ...), a bare callable
+        ``fn(pred, ref) -> float`` (e.g. ``medpy.metric.binary.hd95``), or a
+        :class:`nnqc.metrics.Metric` instance/subclass. Defaults to Dice.
     checkpoint
         ``"best"`` (diffusion_unet.pt) or ``"last"`` (diffusion_unet_last.pt).
     num_steps
@@ -151,6 +158,9 @@ def check(
         If False, skip mapping the reconstruction back to the input grid
         (faster; ``reconstruction`` will be ``None``).
     """
+    from nnqc.metrics import as_metric
+
+    metric_obj = as_metric(metric)
     cfg = resolve_config(config, env, task, stage="diffusion", overrides=overrides)
     set_determinism(seed)
     dev = torch.device("cuda") if device is None else torch.device(
@@ -269,21 +279,26 @@ def check(
         else:
             pgt[s:e, 0] = (decoded[:, 0].sigmoid() > 0.5).float()
 
-    # --- QC scores (input mask vs reconstruction) ----------------------------
-    slice_scores = np.zeros(n_slices, dtype=np.float32)
-    for i in range(n_slices):
-        a = (masks[i, 0] > 0.5) if num_classes == 1 else (masks[i, 0] > 0.5)
-        b = (pgt[i, 0] > 0.5) if num_classes == 1 else (pgt[i, 0] > 0.5)
-        slice_scores[i] = _binary_dice(a.float(), b.float())
-    qc_score = _binary_dice((masks > 0.5).float(), (pgt > 0.5).float())
+    # --- QC scores (candidate mask vs reconstruction) ------------------------
+    # pred = reconstruction (pgt), ref = candidate mask. Metric decides meaning.
+    masks_np = masks[:, 0].detach().cpu().numpy()   # [D, P, P] label map
+    pgt_np = pgt[:, 0].detach().cpu().numpy()       # [D, P, P]
+    fg_ref = masks_np > 0.5
+    fg_pred = pgt_np > 0.5
+
+    slice_scores = np.array(
+        [metric_obj(fg_pred[i], fg_ref[i]) for i in range(n_slices)], dtype=np.float32)
+    qc_score = metric_obj(fg_pred, fg_ref)
 
     per_class = {}
     if num_classes > 1:
         for cidx in range(1, num_classes):
-            per_class[cidx] = _binary_dice((masks == cidx).float(), (pgt == cidx).float())
+            per_class[cidx] = metric_obj(pgt_np == cidx, masks_np == cidx)
 
     result = QCResult(
         qc_score=qc_score,
+        metric_name=metric_obj.name,
+        higher_is_better=metric_obj.higher_is_better,
         qc_score_per_class=per_class,
         slice_scores=slice_scores,
         slice_ratios=ratios.squeeze(1).detach().cpu().numpy(),
@@ -307,5 +322,6 @@ def check(
             print(f"[nnqc] warning: inverse mapping to input grid failed ({exc}); "
                   "returning model-space reconstruction only.")
 
-    print(f"[nnqc] QC score (Dice input vs reconstruction) = {qc_score:.4f}")
+    arrow = "higher=better" if metric_obj.higher_is_better else "lower=better"
+    print(f"[nnqc] QC score ({metric_obj.name}, {arrow}) = {qc_score:.4f}")
     return result
