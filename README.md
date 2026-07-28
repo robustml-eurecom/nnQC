@@ -257,12 +257,16 @@ nnQC/
 If you use nnQC, please cite:
 
 ```bibtex
-@article{marciano2025diffusion,
-  title={Diffusion-Based Quality Control of Medical Image Segmentations across Organs},
-  author={Marcian{\`o}, Vincenzo and Chaptoukaev, Hava and Fernandez, Virginia and Cardoso, M Jorge and Ourselin, S{\'e}bastien and Antonelli, Michela and Zuluaga, Maria A},
-  journal={arXiv preprint arXiv:2511.09588},
-  year={2025}
-}
+@ARTICLE{11614032,
+  author={Marcianò, Vincenzo and Chaptoukaev, Hava and Fernandez, Virginia and Cardoso, M. Jorge and Antonelli, Michela and Ourselin, Sébastien and Zuluaga, Maria A.},
+  journal={IEEE Transactions on Medical Imaging}, 
+  title={Diffusion-Based Quality Control of Medical Image Segmentations across Organs}, 
+  year={2026},
+  volume={},
+  number={},
+  pages={1-1},
+  keywords={Modeling;Biomedical imaging;Training;Biological systems;Learning (artificial intelligence);Labeling;Image segmentation;Magnetic resonance imaging;Layered division multiplexing;Conferences;Quality Control;Generative Modeling;Self-adapting Framework;Medical Image Segmentation},
+  doi={10.1109/TMI.2026.3714697}}
 ```
 
 See [CITATION.cff](CITATION.cff) for a machine-readable version.
