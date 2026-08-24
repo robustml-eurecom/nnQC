@@ -182,7 +182,7 @@ The reconstruction is returned on the input volume's grid (shape + affine).
 
 ### Pretrained weights
 
-Trained checkpoints are published on Zenodo, one deposition per task. Download with:
+Trained checkpoints are published on Zenodo as a single archive `nnQC_pretrained_weights.zip` (one `weight_<task>/` folder per task, cached under `trained_weights/.cache/`). Download with:
 
 ```bash
 nnqc download prostate
@@ -190,7 +190,7 @@ nnqc download prostate
 python -c "import nnqc; nnqc.download_weights('prostate')"
 ```
 
-The record id is resolved from the `ZENODO_RECORDS` map in `nnqc/hub.py`, overridable per task with the `NNQC_ZENODO_RECORD_<TASK>` environment variable or the `--record` CLI flag. If no record id is known for a task, the downloader raises a clear error saying how to pass one. Checkpoints auto-download on first use of `check`/`evaluate` if missing. Weight files are placed under `trained_weights/<task>/`.
+The record id is resolved from `ZENODO_RECORD` in `nnqc/hub.py`, overridable with the `NNQC_ZENODO_RECORD` (or per-task `NNQC_ZENODO_RECORD_<TASK>`) environment variable or the `--record` CLI flag. If no record id is known for a task, the downloader raises a clear error saying how to pass one. Checkpoints auto-download on first use of `check`/`evaluate` if missing. Weight files are placed under `trained_weights/<task>/`.
 
 ## Code organization and key modules
 
@@ -201,7 +201,7 @@ The record id is resolved from the `ZENODO_RECORDS` map in `nnqc/hub.py`, overri
 | `nnqc/train.py` | Autoencoder and diffusion training loops; contains `EMA`, corruption sampling, and DDP logic. |
 | `nnqc/evaluate.py` | DDIM sampling and reconstruction visualization panels. |
 | `nnqc/infer.py` | `check()` and `QCResult`; preprocessing, inverse transforms, and metric aggregation. |
-| `nnqc/hub.py` | Zenodo weight downloader (stdlib `urllib`, no token needed). |
+| `nnqc/hub.py` | Zenodo weight downloader: downloads the shared zip archive once, extracts `weight_<task>/` (stdlib `urllib` + `zipfile`, no token needed). |
 | `nnqc/metrics.py` | Pluggable `Metric` base class and built-ins (`dice`, `iou`, medpy adapters). |
 | `nnqc/xa.py` | `CLIPCrossAttentionGrid`: UniMed-CLIP wrapper that produces cross-attention context. **CUDA-only.** |
 | `nnqc/corruptions.py` | `corrupt_ohe_masks_v2`: signed-distance-transform based realistic corruptions. |
