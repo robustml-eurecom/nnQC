@@ -15,7 +15,6 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
-
 import torch
 import torch.nn.functional as F
 from monai.networks.schedulers import DDIMScheduler
@@ -26,7 +25,15 @@ from torch.utils.tensorboard import SummaryWriter
 
 from nnqc.config import resolve_config
 from nnqc.corruptions import corrupt_ohe_masks_v2
-from nnqc.utils import compute_spacing, define_instance, prepare_general_dataloader, prepare_msd_dataloader
+from nnqc.utils import (
+    compute_spacing,
+    define_instance,
+    load_scale_factor,
+    onehot_conditioning_enabled,
+    prepare_general_dataloader,
+    prepare_msd_dataloader,
+    resolve_torch_device,
+)
 from nnqc.xa import CLIPCrossAttentionGrid
 
 
@@ -42,8 +49,7 @@ def evaluate(
     device=None,
     seed: int = 42,
     auto_download: bool = True,
-    hf_token=None,
-    hf_repo: str = "sanbast/nnQC",
+    record_id=None,
     **overrides,
 ):
     """Sample reconstructions and write comparison panels.
@@ -64,10 +70,7 @@ def evaluate(
     cfg = resolve_config(config, env, task, stage="diffusion", overrides=overrides)
     set_determinism(seed)
 
-    if device is None:
-        dev = torch.device("cuda")
-    else:
-        dev = torch.device(device if isinstance(device, str) else f"cuda:{int(device)}")
+    dev = resolve_torch_device(device)
     print(f"[nnqc] evaluate | device={dev}")
 
     out_dir = Path(cfg.output_dir) / f"eval_step_{step:04d}"
@@ -77,7 +80,7 @@ def evaluate(
     writer = SummaryWriter(str(tb_dir))
 
     size_divisible = 2 ** (len(cfg.autoencoder_def["channels"]) + len(cfg.diffusion_def["channels"]) - 2)
-    spacing = compute_spacing("dataset", cfg, save=False)
+    spacing = compute_spacing(cfg.data_base_dir, cfg, save=False)
     if cfg.is_msd:
         _, val_loader = prepare_msd_dataloader(
             cfg, cfg.autoencoder_train["batch_size"], cfg.autoencoder_train["patch_size"], spacing,
@@ -96,7 +99,7 @@ def evaluate(
 
     if auto_download and task is not None:
         from nnqc.hub import ensure_weights
-        ensure_weights(task, cfg.model_dir, token=hf_token, repo_id=hf_repo)
+        ensure_weights(task, cfg.model_dir, record_id=record_id)
 
     autoencoder = define_instance(cfg, "autoencoder_def").to(dev).eval()
     autoencoder.load_state_dict(torch.load(
@@ -107,12 +110,14 @@ def evaluate(
     unet.load_state_dict(torch.load(os.path.join(cfg.model_dir, ckpt), map_location=dev, weights_only=True))
     print(f"  loaded UNet from {ckpt}")
 
+    _xa_sd = torch.load(
+        os.path.join(cfg.model_dir, "xa.pt" if checkpoint == "best" else "xa_last.pt"),
+        map_location=dev, weights_only=True)
     xa = CLIPCrossAttentionGrid(
         output_dim=cfg.diffusion_def["cross_attention_dim"], grid_reduction="column_softmax",
+        mask_gate=any(k.startswith("mask_state.") for k in _xa_sd),
     ).to(dev).eval()
-    xa.load_state_dict(torch.load(
-        os.path.join(cfg.model_dir, "xa.pt" if checkpoint == "best" else "xa_last.pt"),
-        map_location=dev, weights_only=True))
+    xa.load_state_dict(_xa_sd)
 
     embed = torch.nn.Sequential(
         torch.nn.Linear(1, 32), torch.nn.GELU(),
@@ -127,8 +132,10 @@ def evaluate(
         if cfg.num_classes > 1:
             check = ohe(check)
         z = autoencoder.encode_stage_2_inputs(check)
-        scale_factor = 1.0 / torch.std(z)
-    print(f"  scale_factor = {scale_factor.item():.4f}")
+        estimated = 1.0 / torch.std(z)
+    # Prefer the value saved at training time; only estimate as a fallback.
+    scale_factor = torch.as_tensor(
+        load_scale_factor(cfg.model_dir, fallback=float(estimated)), device=dev)
 
     scheduler = DDIMScheduler(
         num_train_timesteps=cfg.NoiseScheduler["num_train_timesteps"],
@@ -160,13 +167,19 @@ def evaluate(
 
         with torch.no_grad(), autocast("cuda", enabled=True):
             corr_mask = corrupt_ohe_masks_v2(images_s, corruption_prob=1.0)
-            corr_in = (corr_mask.argmax(1, keepdim=True).float() / cfg.num_classes
-                       if cfg.num_classes > 1 else corr_mask.float())
+            onehot = onehot_conditioning_enabled(cfg)
+            if onehot:
+                gate_in = corr_mask.argmax(1, keepdim=True)   # fg fraction, like the other paths
+                corr_in = corr_mask.float()
+            elif cfg.num_classes > 1:
+                gate_in = corr_in = corr_mask.argmax(1, keepdim=True).float() / cfg.num_classes
+            else:
+                gate_in = corr_in = corr_mask.float()
             slice_emb = embed(ratios_s).float()
-            c, _, _ = xa(scans_s, ext_features=slice_emb)
-            c = c.float().unsqueeze(1)
+            c = xa.build_context(scans_s, slice_emb, mask=gate_in).float()
             z_enc = autoencoder.encode_stage_2_inputs(images_s) * scale_factor
-            mask_resized = F.interpolate(corr_in, size=z_enc.shape[2:], mode="nearest")
+            mask_resized = F.interpolate(corr_in, size=z_enc.shape[2:],
+                                         mode="area" if onehot else "nearest")
             z_t = torch.randn(z_enc.shape, device=dev, dtype=z_enc.dtype)
             scheduler.set_timesteps(num_steps)
             for t in scheduler.timesteps:
@@ -194,7 +207,8 @@ def evaluate(
             axes[row, 3].imshow(samp_lbl, **kw)
             axes[row, 0].set_ylabel(f"{name}\nr={slice_ratios[idx].item():.2f}", fontsize=10)
             for ax in axes[row]:
-                ax.set_xticks([]); ax.set_yticks([])
+                ax.set_xticks([])
+                ax.set_yticks([])
         axes[0, 0].set_title("scan")
         axes[0, 1].set_title("corrupted")
         axes[0, 2].set_title("GT")

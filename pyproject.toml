@@ -44,11 +44,20 @@ dependencies = [
     "pillow>=10",
     "einops>=0.8",
     "tqdm>=4.66",
-    # CLIP cross-attention (UniMedCLIP)
-    "open-clip-torch>=2.24",
+    # CLIP cross-attention (UniMedCLIP).
+    # NOTE: nnqc/xa.py needs the UniMed-CLIP *fork* of open_clip, not the
+    # upstream `open-clip-torch` package - it calls `open_clip.get_mean_std` and
+    # passes `inmem=` / `text_encoder_name=` to `create_model_and_transforms`,
+    # none of which exist upstream. Install it with:
+    #   pip install git+https://github.com/mbzuai-oryx/UniMed-CLIP.git
+    "open_clip_torch @ git+https://github.com/mbzuai-oryx/UniMed-CLIP.git",
     "timm>=1.0",
     "transformers>=4.40",
-    # weight download from the Hugging Face Hub
+    # xa.py imports cv2 for the CLIP input preprocessing.
+    "opencv-python-headless>=4.9",
+    # MONAI's PerceptualLoss(network_type="squeeze") backend.
+    "lpips>=0.1.4",
+    # used by scripts/prepare_backbone.py to fetch the UniMed-CLIP backbone
     "huggingface_hub>=0.23",
     # logging / viz
     "tensorboard>=2.17",
@@ -102,5 +111,8 @@ line-length = 100
 target-version = "py310"
 
 [tool.ruff.lint]
-extend-select = ["E", "F", "I", "W", "UP"]
+# `select`, not `extend-select`: extend-select adds to ruff's *default* set, which
+# grows between releases (0.16 added BLE/S/PIE/RUF to the default), so the same
+# command silently linted more rules after a ruff upgrade. Pin the set instead.
+select = ["E", "F", "I", "W", "UP"]
 ignore = ["E501"]

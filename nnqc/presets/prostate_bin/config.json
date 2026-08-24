@@ -30,10 +30,13 @@
     },
     "autoencoder_train": {
         "batch_size": 32,
-        "patch_size": [256, 256],
-        "lr": 5e-5,
+        "patch_size": [
+            256,
+            256
+        ],
+        "lr": 5e-05,
         "perceptual_weight": 1.0,
-        "kl_weight": 1e-6,
+        "kl_weight": 1e-06,
         "recon_loss": "dice_ce",
         "max_epochs": 500,
         "val_interval": 10
@@ -43,24 +46,43 @@
         "spatial_dims": "@spatial_dims",
         "in_channels": 3,
         "out_channels": "@latent_channels",
-        "channels": [32, 64, 128, 256],
-        "attention_levels": [false, true, true, true],
-        "num_head_channels": [0, 32, 32, 32],
+        "channels": [
+            32,
+            64,
+            128,
+            256
+        ],
+        "attention_levels": [
+            false,
+            true,
+            true,
+            true
+        ],
+        "num_head_channels": [
+            0,
+            32,
+            32,
+            32
+        ],
         "num_res_blocks": 2,
         "with_conditioning": true,
         "cross_attention_dim": 512
     },
     "diffusion_train": {
         "batch_size": 64,
-        "patch_size": [256, 256],
-        "lr": 2.5e-5,
+        "patch_size": [
+            256,
+            256
+        ],
+        "lr": 2.5e-05,
         "max_epochs": 4000,
         "val_interval": 10,
         "scheduler": "cosine",
         "warmup_epochs": 20,
         "warmup_dice_epochs": 100,
         "lambda_recon": 0.1,
-        "ema_decay": 0.999
+        "ema_decay": 0.999,
+        "best_metric": "recon"
     },
     "NoiseScheduler": {
         "num_train_timesteps": 1000,

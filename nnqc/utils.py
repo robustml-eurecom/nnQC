@@ -315,13 +315,21 @@ def create_transforms(args, channel=0, sample_axis=0):
     train_patch_size = args.autoencoder_train["patch_size"][:2]  # Take first 2 dimensions
     
     # Determine intensity scaling based on modality
+    # Out-of-window clipping (opt-in via env/config `clip_intensity`).
+    # Historically the CT window [-57, 164] HU was scaled WITHOUT clip, so air
+    # (-1000) and bone (+1000) span ~[-4.3, +4.3] and the organ occupies ~12% of
+    # the intensity range - notably squashing the contrast that the frozen CLIP
+    # tower sees after its per-slice min-max. Kept off by default because the
+    # shipped checkpoints were trained on unclipped inputs; enable it for NEW
+    # training runs (it is part of the input distribution, i.e. a new regime).
+    _clip = bool(getattr(args, "clip_intensity", False))
     if hasattr(args, 'modality') and args.modality == 'mri':
         intensity_transform = ScaleIntensityRangePercentilesd(
-            keys="image", lower=0, upper=99.5, b_min=0, b_max=1
+            keys="image", lower=0, upper=99.5, b_min=0, b_max=1, clip=_clip
         )
     elif hasattr(args, 'modality') and args.modality == 'ct':
         intensity_transform = ScaleIntensityRanged(
-            keys="image", a_min=-57, a_max=164, b_min=0, b_max=1
+            keys="image", a_min=-57, a_max=164, b_min=0, b_max=1, clip=_clip
         )
     elif hasattr(args, 'modality') and args.modality == 'us':
         intensity_transform = NormalizeIntensityd(
@@ -506,6 +514,12 @@ def extract_identifier(filename: str, pattern: str) -> str:
     return identifier.strip('_-.')
 
 
+# Minimum `calculate_match_score` needed to accept an image/label pair. An exact
+# identifier match scores 10 (equality) + 5 (subset) + 2 per shared token, so 10
+# accepts exact matches and rejects pairs that only share a token or two.
+MIN_PAIR_SCORE = 10.0
+
+
 def calculate_match_score(img_id: str, lbl_id: str, img_name: str, lbl_name: str) -> float:
     """Calculate how well two files match based on identifiers and names."""
     score = 0.0
@@ -584,6 +598,7 @@ def find_paired_files(
     # --- CORRECT PAIRING LOGIC ---
     # This replaces the buggy list comprehension
     paired_files = []
+    unmatched = []
     for img_path in sorted(image_files):
         img_name = os.path.basename(img_path)
         img_identifier = extract_identifier(img_name, image_pattern)
@@ -601,12 +616,23 @@ def find_paired_files(
                 best_score = score
                 best_match = lbl_path
         
-        if best_match:
+        # Require a real identifier match, not merely "the best of a bad lot".
+        # `best_match` is always truthy when any label exists, so without this
+        # threshold an unrelated label is silently accepted as the pair and the
+        # model trains on mismatched image/label data.
+        if best_match is not None and best_score >= MIN_PAIR_SCORE:
             paired_files.append({
                 'image': img_path,
                 'label': best_match
             })
-    
+        else:
+            unmatched.append(os.path.basename(img_path))
+
+    if unmatched:
+        preview = ", ".join(unmatched[:5]) + (" ..." if len(unmatched) > 5 else "")
+        print(f"WARNING: {len(unmatched)} image(s) had no confident label match "
+              f"(score < {MIN_PAIR_SCORE}) and were dropped: {preview}")
+
     print(f"Successfully created {len(paired_files)} pairs.")
     return paired_files
 
@@ -634,13 +660,16 @@ def prepare_general_dataloader(
     **dataloader_kwargs
 ) -> Tuple[DataLoader, DataLoader, Optional[DataLoader]]:
     
-    print("Searching for paired files in: ", os.path.join("dataset", args.task))
+    # Honour data_base_dir / --data-dir. This used to be the literal "dataset",
+    # which silently ignored the configured data root.
+    data_root = os.path.join(getattr(args, "data_base_dir", None) or "dataset", args.task)
+    print("Searching for paired files in: ", data_root)
     print(f"Image pattern: {image_pattern}")
     print(f"Label pattern: {label_pattern}")
-    
+
     # Find paired files
     paired_files = find_paired_files(
-        root_dir=os.path.join("dataset", args.task),
+        root_dir=data_root,
         image_pattern=image_pattern,
         label_pattern=label_pattern,
         recursive=recursive,
@@ -715,13 +744,21 @@ def prepare_general_dataloader(
     else:
         compute_dtype = torch.float32
 
+    # Out-of-window clipping (opt-in via env/config `clip_intensity`).
+    # Historically the CT window [-57, 164] HU was scaled WITHOUT clip, so air
+    # (-1000) and bone (+1000) span ~[-4.3, +4.3] and the organ occupies ~12% of
+    # the intensity range - notably squashing the contrast that the frozen CLIP
+    # tower sees after its per-slice min-max. Kept off by default because the
+    # shipped checkpoints were trained on unclipped inputs; enable it for NEW
+    # training runs (it is part of the input distribution, i.e. a new regime).
+    _clip = bool(getattr(args, "clip_intensity", False))
     if hasattr(args, 'modality') and args.modality == 'mri':
         intensity_transform = ScaleIntensityRangePercentilesd(
-            keys="image", lower=0, upper=99.5, b_min=0, b_max=1
+            keys="image", lower=0, upper=99.5, b_min=0, b_max=1, clip=_clip
         )
     elif hasattr(args, 'modality') and args.modality == 'ct':
         intensity_transform = ScaleIntensityRanged(
-            keys="image", a_min=-57, a_max=164, b_min=0, b_max=1
+            keys="image", a_min=-57, a_max=164, b_min=0, b_max=1, clip=_clip
         )
     elif hasattr(args, 'modality') and args.modality == 'us':
         intensity_transform = NormalizeIntensityd(
@@ -781,23 +818,41 @@ def prepare_general_dataloader(
     val_ds = CacheDataset(data=val_data, transform=val_transforms, cache_rate=cache, num_workers=8)
     test_ds = CacheDataset(data=test_data, transform=val_transforms, cache_rate=cache, num_workers=8) if test_data else None
     
-    # Create dataloaders
+    # Distributed sampling. Without these the loaders hand every rank the *same*
+    # volumes (so 4 GPUs recompute one GPU's work), and the trainer's
+    # `loader.sampler.set_epoch(epoch)` call raises AttributeError on the plain
+    # SequentialSampler. The MSD loader has always done this; this one did not.
+    train_sampler = None
+    val_sampler = None
+    if ddp_bool:
+        train_sampler = torch.utils.data.distributed.DistributedSampler(
+            train_ds, num_replicas=world_size, rank=torch.distributed.get_rank(), shuffle=True
+        )
+        val_sampler = torch.utils.data.distributed.DistributedSampler(
+            val_ds, num_replicas=world_size, rank=torch.distributed.get_rank(), shuffle=False
+        )
+
+    # Batch dimension comes from RandSpatialCropSamplesd (num_samples=batch_size)
+    # flattened by list_data_collate, so the loader itself walks one volume at a
+    # time.
     train_loader = DataLoader(
         train_ds,
         batch_size=1,
-        shuffle=False,
+        shuffle=(train_sampler is None),
         num_workers=0,
+        sampler=train_sampler,
         **dataloader_kwargs
     )
-    
+
     val_loader = DataLoader(
         val_ds,
         batch_size=1,
         shuffle=False,
         num_workers=0,
+        sampler=val_sampler,
         **dataloader_kwargs
     )
-    
+
     test_loader = None
     if test_ds:
         test_loader = DataLoader(
@@ -816,10 +871,10 @@ def prepare_general_dataloader(
     
     print(f'TRAIN: Image shape {train_ds[0][0]["image"].shape}, Label shape {train_ds[0][0]["label"].shape}')
     print(f'VAL: Image shape {val_ds[0][0]["image"].shape}, Label shape {val_ds[0][0]["label"].shape}\n')
-    
-    if test_loader is None:
-        return train_loader, val_loader
-    
+
+    # Always a 3-tuple. This used to return 2 values when the int-truncated
+    # split happened to leave no test remainder, which crashed the diffusion
+    # trainer and evaluate() - both of which unpack three.
     return train_loader, val_loader, test_loader
 
 
@@ -1472,6 +1527,49 @@ def prepare_msd_dataloader(
     return train_loader, val_loader
 
 
+def resolve_torch_device(device):
+    """Normalise the many spellings of a device into a ``torch.device``.
+
+    The CLI hands these through as *strings* (``--device 0`` -> ``"0"``), the
+    notebook API as ints or ``"cuda:2"``, and both default to ``None``. Passing
+    a bare numeric string straight to ``torch.device`` raises
+    ``RuntimeError: Invalid device string: '0'``, which is what evaluate() and
+    check() used to do with the CLI's own arguments.
+    """
+    if device is None:
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if isinstance(device, torch.device):
+        return device
+    if isinstance(device, int):
+        return torch.device(f"cuda:{device}")
+    if isinstance(device, str):
+        s = device.strip()
+        if s.isdigit():                 # "0" -> cuda:0
+            return torch.device(f"cuda:{int(s)}")
+        return torch.device(s)          # "cuda", "cuda:2", "cpu"
+    return torch.device(f"cuda:{int(device)}")
+
+
+def load_scale_factor(model_dir, fallback=None):
+    """Read the latent `scale_factor` saved by diffusion training.
+
+    The scaling that maps autoencoder latents into the diffusion model's working
+    range is a property of the trained model, so it must be reused verbatim at
+    inference. Returns `fallback` (re-estimated from data) with a warning when a
+    checkpoint predates this file.
+    """
+    path = os.path.join(model_dir, "scale_factor.txt")
+    if os.path.exists(path):
+        with open(path) as f:
+            value = float(f.read().strip())
+        print(f"[nnqc] scale_factor = {value:.4f} (from {path})")
+        return value
+    print(f"[nnqc] WARNING: no {path}; falling back to re-estimating scale_factor "
+          "from the data. Sampling quality may differ from training - retrain or "
+          "write the file by hand to fix this.")
+    return fallback
+
+
 def define_instance(args, instance_def_key):
     parser = ConfigParser(vars(args))
     parser.parse(True)
@@ -1937,3 +2035,23 @@ class MultiComponentLoss():
         else:
             return contributes["Total"]
 
+
+
+def onehot_conditioning_enabled(cfg) -> bool:
+    """True when the diffusion UNet expects per-class one-hot conditioning
+    channels instead of the legacy single ordinal channel.
+
+    The legacy path collapses the corrupted one-hot mask to
+    ``argmax/num_classes`` and nearest-downsamples it to latent resolution,
+    discarding sub-cell class composition (worst on cardiac: a third of latent
+    cells class-mixed, FINDINGS 2/14). The one-hot path keeps all class
+    channels and area-resizes them, so fractional occupancy survives.
+
+    Detected structurally, not via a flag: ``in_channels == latent_channels +
+    num_classes`` selects one-hot, ``in_channels == latent_channels + 1`` the
+    legacy ordinal. The UNet state_dict enforces the same constraint at load
+    time, so the two can never silently disagree.
+    """
+    nc = cfg.num_classes
+    cond_ch = cfg.diffusion_def["in_channels"] - cfg.latent_channels
+    return nc > 1 and cond_ch == nc

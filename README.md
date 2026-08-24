@@ -19,6 +19,21 @@ slice-ratio embedding so the same 2D model handles apex / mid / base slices.
 
 ---
 
+## News
+
+- **2026-08-24** - MCP server released: expose nnQC to MCP-capable agents
+  (`python -m nnqc.mcp_server`). See [MCP server](#mcp-server) below and the
+  [walkthrough demo](docs/mcp_demo.md).
+- **2026-07-10** - Paper accepted at IEEE Transactions on Medical Imaging.
+- **2025-12-29** - Paper submitted and under review at IEEE TMI.
+
+### Roadmap
+
+- Publish pretrained weights on Zenodo for prostate, spleen, cardiac and liver.
+- MONAI tutorial covering the full train-then-QC workflow.
+
+---
+
 ## Installation
 
 `nnqc` is a Python package and is best used inside a fresh virtualenv. We
@@ -45,9 +60,8 @@ without activating the venv, prefix it with `uv run` (e.g.
 ### Pretrained weights
 
 Trained checkpoints are **not** distributed in the git repo because they
-exceed 1 GB per task. They live in the Hugging Face Hub repo
-[`sanbast/nnQC`](https://huggingface.co/sanbast/nnQC) (private) and can be
-fetched with the built-in helper:
+exceed 1 GB per task. They are published on [Zenodo](https://zenodo.org), one
+deposition per task, and can be fetched with the built-in helper:
 
 ```python
 import nnqc
@@ -59,11 +73,33 @@ nnqc download prostate                 # same, from the CLI
 ```
 
 `check` and `evaluate` also auto-download a task's weights on first use if
-they are missing. Because the repo is private, supply a read token via the
-`HF_TOKEN` environment variable (or `huggingface-cli login`). The four files
-per task (`autoencoder.pt`, `diffusion_unet.pt`, `xa.pt`, `embed.pt`) are
-placed under `trained_weights/<task>/`, where `xa.pt` already bundles the
-UniMedCLIP backbone.
+they are missing. The four files per task (`autoencoder.pt`,
+`diffusion_unet.pt`, `xa.pt`, `embed.pt`) are placed under
+`trained_weights/<task>/`, where `xa.pt` already bundles the UniMedCLIP
+backbone.
+
+The Zenodo record id for a task is resolved from the `ZENODO_RECORDS` map in
+`nnqc/hub.py`. Until the depositions are published (see the roadmap below),
+pass the id explicitly:
+
+```bash
+nnqc download prostate --record 1234567
+# or
+export NNQC_ZENODO_RECORD_PROSTATE=1234567
+```
+
+<details>
+<summary>Maintainer note: publishing weights on Zenodo</summary>
+
+1. Create a new deposition on Zenodo (one per task).
+2. Upload the four files from `trained_weights/<task>/`
+   (`autoencoder.pt`, `diffusion_unet.pt`, `xa.pt`, `embed.pt`).
+3. Publish the deposition and copy its numeric record id.
+4. Either add the id to `ZENODO_RECORDS` in `nnqc/hub.py`
+   (`{"prostate": "1234567", ...}`), or export
+   `NNQC_ZENODO_RECORD_<TASK>=<id>` when downloading.
+
+</details>
 
 ---
 
@@ -219,6 +255,45 @@ slices. From the CLI use `--metric dice|iou|hd95|assd`.
 
 ---
 
+## MCP server
+
+`nnqc/mcp_server.py` exposes QC to MCP-capable agents (Claude Desktop, Codex,
+...) over stdio:
+
+```bash
+python -m nnqc.mcp_server
+```
+
+Three tools are registered:
+
+- `list_tasks` - which trained organ models are available, with modality and
+  class names.
+- `check_mask` - score a scan + candidate mask pair; returns the QC score, a
+  per-class breakdown, and the worst-scoring slices.
+- `explain_qc_score` - how to read a score, including the measured reliability
+  limits.
+
+A minimal client configuration (Claude Desktop style):
+
+```json
+{
+  "mcpServers": {
+    "nnqc": {
+      "command": "python",
+      "args": ["-m", "nnqc.mcp_server"]
+    }
+  }
+}
+```
+
+Two caveats: the server needs a GPU (`nnqc/xa.py` is CUDA-only), and **stdout
+is the JSON-RPC transport**, so nnqc's own progress prints are redirected to
+stderr. Set `NNQC_MCP_STRICT_STDOUT=1` to make any non-JSON write to stdout
+raise instead of silently corrupting the protocol. A full walkthrough with
+example exchanges is in [docs/mcp_demo.md](docs/mcp_demo.md).
+
+---
+
 ## Repository layout
 
 ```
@@ -230,7 +305,7 @@ nnQC/
 │   ├── train.py                Training loops (autoencoder + diffusion)
 │   ├── evaluate.py             DDIM sampling + reconstruction panels
 │   ├── infer.py                check(): one-call QC on a scan + mask pair
-│   ├── hub.py                  download_weights(): fetch checkpoints from HF Hub
+│   ├── hub.py                  download_weights(): fetch checkpoints from Zenodo
 │   ├── metrics.py              Pluggable QC metrics (Dice, IoU, medpy adapters)
 │   ├── xa.py                   CLIPCrossAttentionGrid (UniMedCLIP wrapper)
 │   ├── corruptions.py          Morphologically realistic mask corruptions

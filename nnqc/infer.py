@@ -40,7 +40,12 @@ from monai.transforms import (
 from monai.utils import set_determinism
 
 from nnqc.config import resolve_config
-from nnqc.utils import define_instance
+from nnqc.utils import (
+    define_instance,
+    load_scale_factor,
+    onehot_conditioning_enabled,
+    resolve_torch_device,
+)
 from nnqc.xa import CLIPCrossAttentionGrid
 
 
@@ -95,11 +100,13 @@ class QCResult:
         return str(path)
 
 
-def _intensity_transform(modality):
+def _intensity_transform(modality, clip=False):
+    # `clip` must match how the checkpoint was trained: the historical default
+    # is unclipped; `clip_intensity` in the config opts new training runs in.
     if modality == "mri":
-        return ScaleIntensityRangePercentilesd(keys="image", lower=0, upper=99.5, b_min=0, b_max=1)
+        return ScaleIntensityRangePercentilesd(keys="image", lower=0, upper=99.5, b_min=0, b_max=1, clip=clip)
     if modality == "ct":
-        return ScaleIntensityRanged(keys="image", a_min=-57, a_max=164, b_min=0, b_max=1)
+        return ScaleIntensityRanged(keys="image", a_min=-57, a_max=164, b_min=0, b_max=1, clip=clip)
     if modality == "us":
         return NormalizeIntensityd(keys="image", nonzero=True, channel_wise=True)
     raise ValueError(f"Unknown modality {modality!r}; expected mri, ct or us.")
@@ -123,14 +130,13 @@ def check(
     *,
     metric=None,
     checkpoint: str = "best",
-    num_steps: int = 5,
+    num_steps: int | None = None,
     inference_batch: int = 16,
     device=None,
     seed: int = 42,
     return_volume: bool = True,
     auto_download: bool = True,
-    hf_token=None,
-    hf_repo: str = "sanbast/nnQC",
+    record_id=None,
     **overrides,
 ) -> QCResult:
     """Run nnQC on one scan + candidate mask pair.
@@ -151,7 +157,10 @@ def check(
     checkpoint
         ``"best"`` (diffusion_unet.pt) or ``"last"`` (diffusion_unet_last.pt).
     num_steps
-        DDIM sampling steps (5 is the recommended default).
+        DDIM sampling steps. ``None`` (default) reads the task's measured
+        optimum from the config's ``inference.num_steps`` (cardiac: 2), falling
+        back to 5. More steps is NOT better here - reconstruction degrades
+        monotonically past the optimum on every task measured.
     inference_batch
         Slices per forward pass.
     return_volume
@@ -163,10 +172,15 @@ def check(
     metric_obj = as_metric(metric)
     cfg = resolve_config(config, env, task, stage="diffusion", overrides=overrides)
     set_determinism(seed)
-    dev = torch.device("cuda") if device is None else torch.device(
-        device if isinstance(device, str) else f"cuda:{int(device)}")
+    dev = resolve_torch_device(device)
     num_classes = cfg.num_classes
     patch = cfg.diffusion_train["patch_size"]
+    if num_steps is None:
+        # Per-task default. The optimum is anatomy-dependent and was measured,
+        # not assumed (results/*_fine_sweep.json): cardiac peaks at 2 DDIM steps
+        # - better reconstruction AND calibration than 5, at 2.5x the speed -
+        # while prostate and liver plateau at 4-5. 5 remains the global fallback.
+        num_steps = int(getattr(cfg, "inference", {}).get("num_steps", 5))
     print(f"[nnqc] check | device={dev} num_classes={num_classes} steps={num_steps}")
 
     # --- preprocessing (invertible geometric chain so we can map back) -------
@@ -198,7 +212,7 @@ def check(
     crop_fg = CropForegroundd(keys=["image", "label"], source_key="image", allow_missing_keys=True)
     resize = Resized(keys=["image", "label"], spatial_size=(patch[0], patch[1], -1),
                      mode=("area", "nearest"), allow_missing_keys=True)
-    intensity = _intensity_transform(cfg.modality)
+    intensity = _intensity_transform(cfg.modality, clip=bool(getattr(cfg, "clip_intensity", False)))
 
     data = slice_crop(data)
     data = crop_fg(data)
@@ -213,21 +227,23 @@ def check(
     masks = mask_vol.permute(3, 0, 1, 2).contiguous()    # [D, 1, P, P]
     ratios = (torch.arange(n_slices, device=dev).float() / max(n_slices - 1, 1)).unsqueeze(1)
 
-    # --- models (auto-fetch weights from the Hub if missing) -----------------
+    # --- models (auto-fetch weights from Zenodo if missing) ------------------
     if auto_download and task is not None:
         from nnqc.hub import ensure_weights
-        ensure_weights(task, cfg.model_dir, token=hf_token, repo_id=hf_repo)
+        ensure_weights(task, cfg.model_dir, record_id=record_id)
     autoencoder = define_instance(cfg, "autoencoder_def").to(dev).eval()
     autoencoder.load_state_dict(torch.load(
         f"{cfg.model_dir}/autoencoder.pt", map_location=dev, weights_only=True))
     unet = define_instance(cfg, "diffusion_def").to(dev).eval()
     ck = "diffusion_unet.pt" if checkpoint == "best" else "diffusion_unet_last.pt"
     unet.load_state_dict(torch.load(f"{cfg.model_dir}/{ck}", map_location=dev, weights_only=True))
-    xa = CLIPCrossAttentionGrid(
-        output_dim=cfg.diffusion_def["cross_attention_dim"], grid_reduction="column_softmax").to(dev).eval()
-    xa.load_state_dict(torch.load(
+    _xa_sd = torch.load(
         f"{cfg.model_dir}/{'xa.pt' if checkpoint == 'best' else 'xa_last.pt'}",
-        map_location=dev, weights_only=True))
+        map_location=dev, weights_only=True)
+    xa = CLIPCrossAttentionGrid(
+        output_dim=cfg.diffusion_def["cross_attention_dim"], grid_reduction="column_softmax",
+        mask_gate=any(k.startswith("mask_state.") for k in _xa_sd)).to(dev).eval()
+    xa.load_state_dict(_xa_sd)
     embed = torch.nn.Sequential(
         torch.nn.Linear(1, 32), torch.nn.GELU(),
         torch.nn.Linear(32, cfg.diffusion_def["cross_attention_dim"])).to(dev).eval()
@@ -235,19 +251,29 @@ def check(
         f"{cfg.model_dir}/{'embed.pt' if checkpoint == 'best' else 'embed_last.pt'}",
         map_location=dev, weights_only=True))
 
-    # candidate mask as the model's conditioning channel
-    if num_classes > 1:
+    # candidate mask as the model's conditioning channel(s): one channel per
+    # class when the UNet was trained that way (area-resized downstream),
+    # otherwise the legacy single ordinal channel.
+    onehot = onehot_conditioning_enabled(cfg)
+    if onehot:
+        cond = F.one_hot(masks[:, 0].long().clamp(0, num_classes - 1),
+                         num_classes).permute(0, 3, 1, 2).float()
+    elif num_classes > 1:
         cond = masks / num_classes
     else:
         cond = (masks > 0.5).float()
 
-    # scale factor, recomputed from the encoded candidate (as in eval)
     if num_classes > 1:
         ohe = F.one_hot(masks[:, 0].long().clamp(0, num_classes - 1), num_classes).permute(0, 3, 1, 2).float()
     else:
         ohe = (masks > 0.5).float()
+
+    # Latent scaling must match training. Estimating it here from the *candidate*
+    # mask made the QC score depend on the very mask being judged: a badly
+    # corrupted input shifted the latent statistics and therefore the sampling
+    # scale. Use the value saved by training, estimating only as a last resort.
     z_probe = autoencoder.encode_stage_2_inputs(ohe[:1])
-    scale_factor = 1.0 / torch.std(z_probe)
+    scale_factor = load_scale_factor(cfg.model_dir, fallback=float(1.0 / torch.std(z_probe)))
 
     scheduler = DDIMScheduler(
         num_train_timesteps=cfg.NoiseScheduler["num_train_timesteps"],
@@ -263,9 +289,14 @@ def check(
         e = min(s + inference_batch, n_slices)
         scan_b, cond_b, r_b = scans[s:e], cond[s:e], ratios[s:e]
         slice_emb = embed(r_b).float()
-        c = xa(scan_b, ext_features=slice_emb)[0].float().unsqueeze(1)
+        # [B, 2, D]: scan token + slice-position token (see xa.build_context).
+        # The gate token needs a foreground mask; in one-hot mode the bg
+        # channel is >0 everywhere, so pass the label map instead.
+        c = xa.build_context(scan_b, slice_emb,
+                             mask=masks[s:e] if onehot else cond_b).float()
         zsh = autoencoder.encode_stage_2_inputs(ohe[s:e]).shape
-        mask_resized = F.interpolate(cond_b, size=zsh[2:], mode="nearest")
+        mask_resized = F.interpolate(cond_b, size=zsh[2:],
+                                     mode="area" if onehot else "nearest")
         gen = torch.Generator(device=dev).manual_seed(seed + s)
         z_t = torch.randn(zsh, generator=gen, device=dev)
         scheduler.set_timesteps(num_steps)

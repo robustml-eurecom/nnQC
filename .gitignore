@@ -45,3 +45,6 @@ Thumbs.db
 
 # Jupyter checkpoints
 .ipynb_checkpoints/
+
+# venv symlink -> $SCRATCH/nnqc/venv (see CLAUDE.md)
+.venv
