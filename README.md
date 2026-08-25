@@ -24,7 +24,7 @@ slice-ratio embedding so the same 2D model handles apex / mid / base slices.
 - **2026-08-24** - MCP server released: expose nnQC to MCP-capable agents
   (`python -m nnqc.mcp_server`). See [MCP server](#mcp-server) below and the
   [walkthrough demo](docs/mcp_demo.md).
-- **2026-07-10** - Paper accepted at IEEE Transactions on Medical Imaging.
+- **2026-07-10** - Paper accepted at IEEE Transactions on Medical Imaging. 🎉🎊🥳
 - **2025-12-29** - Paper submitted and under review at IEEE TMI.
 
 ### Roadmap
@@ -128,13 +128,15 @@ explicit JSON pair:
   scheduler settings.
 
 Any field can be overridden from the CLI or the Python API without editing
-the JSON. Bundled presets:
+the JSON. Bundled presets, all with pretrained weights on Zenodo (see above):
 
-| Task | num_classes | Modality | Preset |
-|------|-------------|----------|--------|
-| MSD Prostate | 3 | MRI T2 | `prostate` |
-| MSD Prostate binary | 1 | MRI T2 | `prostate_bin` |
-| MSD Spleen | 1 | CT | `spleen` |
+| Task | Anatomy | num_classes | Modality | Preset |
+|------|---------|-------------|----------|--------|
+| MSD Task03 + holdout | Liver | 1 | CT | `liver` |
+| MSD Task05 + Prostate158 | Prostate (peripheral + transition zone) | 3 | MRI T2 | `prostate` |
+| ACDC | Cardiac (LV, RV, myocardium) | 4 | MRI | `cardiac` |
+| MSD Task09 | Spleen | 1 | CT | `spleen` |
+| MSD Prostate binary | Prostate (whole gland) | 1 | MRI T2 | `prostate_bin` |
 
 Run `nnqc list-tasks` to see what is installed. The same JSON files also live
 under `configs/` for you to copy and edit.
