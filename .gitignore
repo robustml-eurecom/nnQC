@@ -52,3 +52,7 @@ Thumbs.db
 # local test suite (kept out of the public repo for now)
 tests/
 pytest.ini
+
+# internal agent notes (local only)
+AGENTS.md
+CLAUDE.md
