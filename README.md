@@ -29,7 +29,6 @@ slice-ratio embedding so the same 2D model handles apex / mid / base slices.
 
 ### Roadmap
 
-- Publish pretrained weights on Zenodo for prostate, spleen, cardiac and liver.
 - MONAI tutorial covering the full train-then-QC workflow.
 
 ---
@@ -80,8 +79,8 @@ task (`autoencoder.pt`, `diffusion_unet.pt`, `xa.pt`, `embed.pt`,
 `scale_factor.txt`) are extracted under `trained_weights/<task>/`, where
 `xa.pt` already bundles the UniMedCLIP backbone.
 
-The Zenodo record id is resolved from `ZENODO_RECORD` in `nnqc/hub.py`. Until
-the deposition is published (see the roadmap below), pass the id explicitly:
+The Zenodo record id is set in `ZENODO_RECORD` in `nnqc/hub.py`. To use a
+different record (e.g. a fork's weights), pass the id explicitly:
 
 ```bash
 nnqc download prostate --record 1234567
@@ -97,10 +96,10 @@ export NNQC_ZENODO_RECORD=1234567
 
    ```bash
    cd trained_weights
-   zip nnQC_pretrained_weights.zip -r weight_liver weight_prostate weight_cardiac weight_spleen
+   zip -r nnQC_pretrained_weights.zip nnQC_pretrained_weights
    ```
 
-   where each `weight_<task>/` contains `autoencoder.pt`, `diffusion_unet.pt`,
+   where `nnQC_pretrained_weights/` holds one `weights_<task>/` folder per task (`weights_acdc` for cardiac), each containing `autoencoder.pt`, `diffusion_unet.pt`,
    `xa.pt`, `embed.pt` and `scale_factor.txt`.
 3. Publish the deposition and copy its numeric record id.
 4. Either add the id to `ZENODO_RECORD` in `nnqc/hub.py`, or export

@@ -5,10 +5,11 @@ record shipping one archive, ``nnQC_pretrained_weights.zip``, which contains one
 folder per task::
 
     nnQC_pretrained_weights.zip
-    ├── weight_liver/{autoencoder.pt, diffusion_unet.pt, xa.pt, embed.pt, scale_factor.txt}
-    ├── weight_prostate/...
-    ├── weight_cardiac/...
-    └── weight_spleen/...
+    └── nnQC_pretrained_weights/
+        ├── weights_liver/{autoencoder.pt, diffusion_unet.pt, xa.pt, embed.pt, scale_factor.txt}
+        ├── weights_prostate/...
+        ├── weights_acdc/...        (the cardiac task)
+        └── weights_spleen/...
 
 ``download_weights("prostate")`` downloads the archive once (it is cached under
 ``trained_weights/.cache/``) and extracts only the requested task into
@@ -41,15 +42,19 @@ from pathlib import Path
 
 ZENODO_API = "https://zenodo.org/api/records"
 
-# Name of the archive inside the Zenodo record, and the per-task folder prefix
-# used within it.
+# Name of the archive inside the Zenodo record, and the per-task folder names
+# used within it (cardiac ships under its dataset name, acdc).
 ARCHIVE_NAME = "nnQC_pretrained_weights.zip"
-ZIP_PREFIX = "weight_"
+ZIP_TASK_FOLDERS = {"cardiac": "weights_acdc"}
+ZIP_PREFIX = "weights_"
+
+
+def _task_folder(task: str) -> str:
+    return ZIP_TASK_FOLDERS.get(task, f"{ZIP_PREFIX}{task}")
 
 # Zenodo record id of the shared weights archive (per-task overrides allowed in
-# ZENODO_RECORDS). Filled in once the deposition is published; until then, pass
-# record_id= / --record or set NNQC_ZENODO_RECORD.
-ZENODO_RECORD = ""
+# ZENODO_RECORDS).
+ZENODO_RECORD = "22087717"
 ZENODO_RECORDS: dict[str, str] = {}
 
 # Files required to run inference / evaluation for a task.
@@ -118,14 +123,16 @@ def _cached_archive(record: dict, record_id: str, cache_dir: Path, overwrite: bo
 
 
 def _extract_task(archive: Path, task: str, dest: Path, files, overwrite: bool) -> None:
-    """Extract ``weight_<task>/<file>`` members of the archive into ``dest``.
+    """Extract the task folder members of the archive into ``dest``.
 
     Tolerates an optional top-level folder inside the zip (e.g.
-    ``nnQC_pretrained_weights/weight_liver/autoencoder.pt``).
+    ``nnQC_pretrained_weights/weights_liver/autoencoder.pt``) and ignores
+    macOS packaging junk (``__MACOSX``, ``.DS_Store``).
     """
     dest.mkdir(parents=True, exist_ok=True)
+    folder = _task_folder(task)
     with zipfile.ZipFile(archive) as zf:
-        names = zf.namelist()
+        names = [n for n in zf.namelist() if not n.startswith("__MACOSX")]
         for fname in files:
             target = dest / fname
             if target.exists() and not overwrite:
@@ -133,12 +140,12 @@ def _extract_task(archive: Path, task: str, dest: Path, files, overwrite: bool) 
                 continue
             member = next(
                 (n for n in names
-                 if Path(n).name == fname and f"{ZIP_PREFIX}{task}" in Path(n).parts),
+                 if Path(n).name == fname and folder in Path(n).parts),
                 None,
             )
             if member is None:
                 raise RuntimeError(
-                    f"{archive.name} has no member '{ZIP_PREFIX}{task}/{fname}' "
+                    f"{archive.name} has no member '{folder}/{fname}' "
                     f"(task folders found: "
                     f"{sorted({p for n in names for p in Path(n).parts if p.startswith(ZIP_PREFIX)})}). "
                     f"Check the archive layout for task {task!r}."
@@ -160,7 +167,7 @@ def download_weights(
     ``trained_weights/<task>/``) and return that directory.
 
     The record id is resolved as described in the module docstring. The record
-    must contain :data:`ARCHIVE_NAME` with a ``weight_<task>/`` folder per task.
+    must contain :data:`ARCHIVE_NAME` with a ``weights_<task>/`` folder per task (cardiac ships as ``weights_acdc``).
     The archive is cached under ``trained_weights/.cache/`` so downloading a
     second task does not fetch it again.
     """
