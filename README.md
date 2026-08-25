@@ -136,7 +136,6 @@ the JSON. Bundled presets, all with pretrained weights on Zenodo (see above):
 | MSD Task05 + Prostate158 | Prostate (peripheral + transition zone) | 3 | MRI T2 | `prostate` |
 | ACDC | Cardiac (LV, RV, myocardium) | 4 | MRI | `cardiac` |
 | MSD Task09 | Spleen | 1 | CT | `spleen` |
-| MSD Prostate binary | Prostate (whole gland) | 1 | MRI T2 | `prostate_bin` |
 
 Run `nnqc list-tasks` to see what is installed. The same JSON files also live
 under `configs/` for you to copy and edit.
@@ -321,7 +320,6 @@ nnQC/
 │   ├── visualize.py            TensorBoard image helpers
 │   └── presets/                Bundled task configs (shipped in the wheel)
 │       ├── prostate/{config,env}.json
-│       ├── prostate_bin/{config,env}.json
 │       └── spleen/{config,env}.json
 ├── configs/                    Editable copies of the presets
 │   ├── prostate/{config,env}.json

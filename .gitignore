@@ -48,3 +48,7 @@ Thumbs.db
 
 # venv symlink -> $SCRATCH/nnqc/venv (see CLAUDE.md)
 .venv
+
+# local test suite (kept out of the public repo for now)
+tests/
+pytest.ini

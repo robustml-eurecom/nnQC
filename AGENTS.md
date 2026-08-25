@@ -50,7 +50,6 @@ nnQC/
 │   └── presets/                # Bundled task configs (shipped in the wheel)
 │       ├── liver/{config,env}.json
 │       ├── prostate/{config,env}.json
-│       ├── prostate_bin/{config,env}.json
 │       ├── cardiac/{config,env}.json
 │       └── spleen/{config,env}.json
 ├── configs/                    # Editable copies of the presets (top-level)
