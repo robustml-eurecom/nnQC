@@ -1,5 +1,7 @@
 # nnQC - Segmentation Quality Control via Latent Diffusion
 
+> **Project page:** <https://robustml-eurecom.github.io/nnQC/>
+
 **nnQC** is a quality-control model for medical image segmentation. It is a
 2D latent diffusion model (LDM) that, given a CT/MR scan and a *corrupted*
 segmentation mask, reconstructs what it believes the *correct* mask should
@@ -59,9 +61,16 @@ without activating the venv, prefix it with `uv run` (e.g.
 ### Pretrained weights
 
 Trained checkpoints are **not** distributed in the git repo because they
-exceed 1 GB per task. They are published on [Zenodo](https://zenodo.org) as a
-single archive, `nnQC_pretrained_weights.zip`, with one `weight_<task>/` folder
-per task, and can be fetched with the built-in helper:
+exceed 1 GB per task. They are published in two places:
+
+- [Zenodo](https://zenodo.org/records/22087717) as a single archive,
+  `nnQC_pretrained_weights.zip`, with one `weights_<task>/` folder per task
+  (used by the built-in helper below);
+- [Hugging Face](https://huggingface.co/sanbast/nnQC) as a model repo with
+  the same `weights_<task>/` folders, for direct per-file download with
+  `huggingface_hub` or `wget`.
+
+Fetch them with the built-in helper:
 
 ```python
 import nnqc
@@ -78,6 +87,14 @@ auto-download a task's weights on first use if they are missing. The files per
 task (`autoencoder.pt`, `diffusion_unet.pt`, `xa.pt`, `embed.pt`,
 `scale_factor.txt`) are extracted under `trained_weights/<task>/`, where
 `xa.pt` already bundles the UniMedCLIP backbone.
+
+From Hugging Face instead:
+
+```python
+from huggingface_hub import snapshot_download
+snapshot_download("sanbast/nnQC", allow_patterns="weights_prostate/*",
+                  local_dir="trained_weights/hf")
+```
 
 The Zenodo record id is set in `ZENODO_RECORD` in `nnqc/hub.py`. To use a
 different record (e.g. a fork's weights), pass the id explicitly:
@@ -104,6 +121,9 @@ export NNQC_ZENODO_RECORD=1234567
 3. Publish the deposition and copy its numeric record id.
 4. Either add the id to `ZENODO_RECORD` in `nnqc/hub.py`, or export
    `NNQC_ZENODO_RECORD=<id>` when downloading.
+5. Mirror the same `weights_<task>/` folders to the Hugging Face model repo
+   (`huggingface_hub.upload_folder`) so users can fetch single files without
+   downloading the whole zip.
 
 </details>
 
