@@ -1,0 +1,42 @@
+{
+ "liver": {
+  "label": "Liver",
+  "modality": "CT \u00b7 MSD Task03",
+  "source": "TotalSegmentator prediction",
+  "steps": 4,
+  "slice": 188,
+  "qc_score": 0.86,
+  "slice_qc_score": 0.929,
+  "dir": "assets/demo_liver"
+ },
+ "prostate": {
+  "label": "Prostate",
+  "modality": "MRI \u00b7 MSD Task05",
+  "source": "synthetic corruption (severity 0.2)",
+  "steps": 4,
+  "slice": 4,
+  "qc_score": 0.82,
+  "slice_qc_score": 0.924,
+  "dir": "assets/demo_prostate"
+ },
+ "cardiac": {
+  "label": "Cardiac",
+  "modality": "MRI \u00b7 ACDC",
+  "source": "synthetic corruption (severity 0.4)",
+  "steps": 5,
+  "slice": 4,
+  "qc_score": 0.717,
+  "slice_qc_score": 0.628,
+  "dir": "assets/demo_cardiac"
+ },
+ "spleen": {
+  "label": "Spleen",
+  "modality": "CT \u00b7 MSD Task09",
+  "source": "synthetic corruption (severity 0.5)",
+  "steps": 5,
+  "slice": 22,
+  "qc_score": 0.713,
+  "slice_qc_score": 0.972,
+  "dir": "assets/demo_spleen"
+ }
+}
