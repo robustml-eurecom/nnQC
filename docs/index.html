@@ -51,16 +51,34 @@
   [data-theme="light"] .step .num { color: #ffffff; }
   a { color: var(--accent3); text-decoration: none; }
   a:hover { text-decoration: underline; }
-  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 0 24px; }
+
+  nav.topnav {
+    position: sticky; top: 0; z-index: 40;
+    background: color-mix(in srgb, var(--bg) 85%, transparent);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--border);
+  }
+  nav.topnav .wrap { display: flex; align-items: center; gap: 22px; height: 52px; }
+  nav.topnav .brand { font-weight: 700; color: var(--fg); margin-right: auto; }
+  nav.topnav .brand span { color: var(--accent); }
+  nav.topnav a.navlink { color: var(--fg-dim); font-size: 0.92rem; }
+  nav.topnav a.navlink:hover { color: var(--accent); text-decoration: none; }
+  @media (max-width: 760px) { nav.topnav a.navlink { display: none; } }
 
   header.hero {
-    padding: 96px 0 56px;
+    padding: 88px 0 60px;
     text-align: center;
     background: radial-gradient(ellipse 80% 60% at 50% 0%, #16303a55 0%, transparent 70%);
   }
-  .hero h1 { font-size: 3.2rem; margin: 0 0 8px; letter-spacing: -0.02em; }
+  .hero h1 { font-size: 3.4rem; margin: 0 0 10px; letter-spacing: -0.02em; }
   .hero h1 .accent { color: var(--accent); }
-  .hero .pitch { font-size: 1.25rem; color: var(--fg-dim); max-width: 720px; margin: 0 auto 28px; }
+  .hero .pitch { font-size: 1.25rem; color: var(--fg-dim); max-width: 760px; margin: 0 auto 26px; }
+  .hero .chips { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-bottom: 26px; }
+  .hero .chips span {
+    font-size: 0.82rem; font-family: var(--mono); color: var(--fg-dim);
+    border: 1px dashed var(--border); border-radius: 999px; padding: 3px 12px;
+  }
   .badges { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
   .badge {
     display: inline-block; padding: 6px 14px; border-radius: 999px;
@@ -70,9 +88,22 @@
   .badge:hover { border-color: var(--accent); text-decoration: none; }
   .badge b { color: var(--accent); font-weight: 600; }
 
-  section { padding: 48px 0; border-top: 1px solid var(--border); }
-  section h2 { font-size: 1.8rem; margin: 0 0 8px; }
-  section .sub { color: var(--fg-dim); margin: 0 0 32px; max-width: 760px; }
+  section { padding: 56px 0; border-top: 1px solid var(--border); }
+  section h2 { font-size: 1.9rem; margin: 0 0 8px; }
+  section .sub { color: var(--fg-dim); margin: 0 0 32px; max-width: 780px; }
+
+  /* ---- results ------------------------------------------------------------ */
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; }
+  @media (max-width: 960px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 560px) { .stats { grid-template-columns: 1fr; } }
+  .stat {
+    background: var(--bg-soft); border: 1px solid var(--border); border-radius: 12px;
+    padding: 20px 22px;
+  }
+  .stat .organ { font-weight: 700; font-size: 1.05rem; }
+  .stat .task { color: var(--fg-dim); font-size: 0.82rem; font-family: var(--mono); }
+  .stat .r { font-size: 2.2rem; font-weight: 700; color: var(--accent); margin: 10px 0 2px; }
+  .stat .cap { color: var(--fg-dim); font-size: 0.85rem; margin: 0; }
 
   /* ---- interactive demo widgets ---------------------------------------- */
   .gallery { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
@@ -147,6 +178,17 @@
 
 <button id="theme-toggle" title="Toggle light/dark theme" aria-label="Toggle light/dark theme">☀</button>
 
+<nav class="topnav">
+  <div class="wrap">
+    <a class="brand" href="#top">nn<span>QC</span></a>
+    <a class="navlink" href="#demo">Demo</a>
+    <a class="navlink" href="#results">Results</a>
+    <a class="navlink" href="#how">Method</a>
+    <a class="navlink" href="#quickstart">Quickstart</a>
+    <a class="navlink" href="#mcp">MCP</a>
+  </div>
+</nav>
+
 <script>
 // Theme toggle: persists in localStorage, defaults to the OS preference.
 (function () {
@@ -169,7 +211,7 @@
 })();
 </script>
 
-<header class="hero">
+<header class="hero" id="top">
   <div class="wrap">
     <h1>nn<span class="accent">QC</span></h1>
     <p class="pitch">
@@ -177,10 +219,15 @@
       A latent diffusion model reconstructs the mask it believes is correct —
       its agreement with your candidate mask is the QC score.
     </p>
+    <div class="chips">
+      <span>CT + MRI</span><span>prostate · cardiac · liver · spleen</span>
+      <span>ground-truth-free</span><span>MCP server included</span>
+    </div>
     <div class="badges">
       <a class="badge" href="https://doi.org/10.1109/TMI.2026.3714697"><b>IEEE TMI</b> 2026 paper</a>
       <a class="badge" href="https://github.com/robustml-eurecom/nnQC"><b>GitHub</b> robustml-eurecom/nnQC</a>
-      <a class="badge" href="https://zenodo.org/records/22087717"><b>Zenodo</b> pretrained weights</a>
+      <a class="badge" href="https://zenodo.org/records/22087717"><b>Zenodo</b> weights archive</a>
+      <a class="badge" href="https://huggingface.co/sanbast/nnQC"><b>Hugging Face</b> weights mirror</a>
       <span class="badge"><b>License</b> MIT</span>
     </div>
   </div>
@@ -196,6 +243,43 @@
       The QC score — Dice(input, pGT) — is computed entirely without ground truth.
     </p>
     <div class="gallery" id="gallery"></div>
+  </div>
+</section>
+
+<section id="results">
+  <div class="wrap">
+    <h2>Calibration results</h2>
+    <p class="sub">
+      Pooled slice-level Pearson correlation between the QC score and the true Dice
+      against ground truth, on held-out cases with synthetic corruptions spanning the
+      full quality range (slices with true Dice exactly 1.0 excluded).
+    </p>
+    <div class="stats">
+      <div class="stat">
+        <div class="organ">Liver</div>
+        <div class="task">CT · MSD Task03</div>
+        <div class="r">r = 0.985</div>
+        <p class="cap">4 DDIM steps</p>
+      </div>
+      <div class="stat">
+        <div class="organ">Prostate</div>
+        <div class="task">MRI · MSD Task05 · 2 classes</div>
+        <div class="r">r = 0.946</div>
+        <p class="cap">4 DDIM steps</p>
+      </div>
+      <div class="stat">
+        <div class="organ">Cardiac</div>
+        <div class="task">MRI · ACDC · 3 classes</div>
+        <div class="r">r = 0.974</div>
+        <p class="cap">5 DDIM steps</p>
+      </div>
+      <div class="stat">
+        <div class="organ">Spleen</div>
+        <div class="task">CT · MSD Task09</div>
+        <div class="r">r = 0.982</div>
+        <p class="cap">4 DDIM steps</p>
+      </div>
+    </div>
   </div>
 </section>
 
@@ -226,7 +310,7 @@
 <section id="quickstart">
   <div class="wrap">
     <h2>Quickstart</h2>
-    <p class="sub">Pretrained weights for prostate, spleen, cardiac and liver download automatically from Zenodo on first use.</p>
+    <p class="sub">Pretrained weights for prostate, spleen, cardiac and liver download automatically on first use (Zenodo archive, also mirrored per-file on Hugging Face).</p>
     <pre><span class="prompt">$ </span>pip install git+https://github.com/robustml-eurecom/nnQC.git
 <span class="prompt">$ </span>nnqc download prostate
 <span class="prompt">$ </span>nnqc check --task prostate --image scan.nii.gz --mask candidate.nii.gz --save recon.nii.gz</pre>
@@ -265,7 +349,10 @@
       <a href="https://doi.org/10.1109/TMI.2026.3714697">IEEE TMI paper</a>
       (see <a href="https://github.com/robustml-eurecom/nnQC/blob/master/CITATION.cff">CITATION.cff</a>).
       Code is MIT-licensed; pretrained weights are on
-      <a href="https://zenodo.org/records/22087717">Zenodo</a>.
+      <a href="https://zenodo.org/records/22087717">Zenodo</a> and
+      <a href="https://huggingface.co/sanbast/nnQC">Hugging Face</a>.
+      Built by <a href="https://sanbast.github.io">Vincenzo Marcianò</a> and the
+      <a href="https://github.com/robustml-eurecom">RobustML group @ EURECOM</a>.
     </p>
     <p>nnQC — latent-diffusion quality control of 3-D medical image segmentations.</p>
   </div>
