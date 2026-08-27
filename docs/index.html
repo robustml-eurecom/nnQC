@@ -92,18 +92,6 @@
   section h2 { font-size: 1.9rem; margin: 0 0 8px; }
   section .sub { color: var(--fg-dim); margin: 0 0 32px; max-width: 780px; }
 
-  /* ---- results ------------------------------------------------------------ */
-  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; }
-  @media (max-width: 960px) { .stats { grid-template-columns: repeat(2, 1fr); } }
-  @media (max-width: 560px) { .stats { grid-template-columns: 1fr; } }
-  .stat {
-    background: var(--bg-soft); border: 1px solid var(--border); border-radius: 12px;
-    padding: 20px 22px;
-  }
-  .stat .organ { font-weight: 700; font-size: 1.05rem; }
-  .stat .task { color: var(--fg-dim); font-size: 0.82rem; font-family: var(--mono); }
-  .stat .r { font-size: 2.2rem; font-weight: 700; color: var(--accent); margin: 10px 0 2px; }
-  .stat .cap { color: var(--fg-dim); font-size: 0.85rem; margin: 0; }
 
   /* ---- interactive demo widgets ---------------------------------------- */
   .gallery { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
@@ -182,7 +170,6 @@
   <div class="wrap">
     <a class="brand" href="#top">nn<span>QC</span></a>
     <a class="navlink" href="#demo">Demo</a>
-    <a class="navlink" href="#results">Results</a>
     <a class="navlink" href="#how">Method</a>
     <a class="navlink" href="#quickstart">Quickstart</a>
     <a class="navlink" href="#mcp">MCP</a>
@@ -243,43 +230,6 @@
       The QC score — Dice(input, pGT) — is computed entirely without ground truth.
     </p>
     <div class="gallery" id="gallery"></div>
-  </div>
-</section>
-
-<section id="results">
-  <div class="wrap">
-    <h2>Calibration results</h2>
-    <p class="sub">
-      Pooled slice-level Pearson correlation between the QC score and the true Dice
-      against ground truth, on held-out cases with synthetic corruptions spanning the
-      full quality range (slices with true Dice exactly 1.0 excluded).
-    </p>
-    <div class="stats">
-      <div class="stat">
-        <div class="organ">Liver</div>
-        <div class="task">CT · MSD Task03</div>
-        <div class="r">r = 0.985</div>
-        <p class="cap">4 DDIM steps</p>
-      </div>
-      <div class="stat">
-        <div class="organ">Prostate</div>
-        <div class="task">MRI · MSD Task05 · 2 classes</div>
-        <div class="r">r = 0.946</div>
-        <p class="cap">4 DDIM steps</p>
-      </div>
-      <div class="stat">
-        <div class="organ">Cardiac</div>
-        <div class="task">MRI · ACDC · 3 classes</div>
-        <div class="r">r = 0.974</div>
-        <p class="cap">5 DDIM steps</p>
-      </div>
-      <div class="stat">
-        <div class="organ">Spleen</div>
-        <div class="task">CT · MSD Task09</div>
-        <div class="r">r = 0.982</div>
-        <p class="cap">4 DDIM steps</p>
-      </div>
-    </div>
   </div>
 </section>
 
